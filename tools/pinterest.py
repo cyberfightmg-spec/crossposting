@@ -6,6 +6,7 @@ import base64
 import httpx
 from PIL import Image
 from playwright.async_api import async_playwright
+from tools.image_utils import fit_image
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -96,15 +97,7 @@ async def load_token() -> str | None:
 
 
 def resize_for_pinterest(image_bytes: bytes) -> bytes:
-    """Приводим изображение к портретному 2:3 (1000×1500) для карусели."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    target_w, target_h = 1000, 1500
-    img.thumbnail((target_w, target_h), Image.LANCZOS)
-    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-    canvas.paste(img, ((target_w - img.width) // 2, (target_h - img.height) // 2))
-    out = io.BytesIO()
-    canvas.save(out, format="JPEG", quality=95)
-    return out.getvalue()
+    return fit_image(image_bytes)
 
 
 async def adapt_pinterest_text(text: str) -> dict:
