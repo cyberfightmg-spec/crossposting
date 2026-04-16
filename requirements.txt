@@ -1,0 +1,6 @@
+fastmcp==2.*
+uvicorn
+httpx
+python-dotenv
+Pillow
+playwright

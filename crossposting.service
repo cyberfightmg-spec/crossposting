@@ -1,0 +1,16 @@
+[Unit]
+Description=Crossposting Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/crossposting
+Environment="PATH=/root/crossposting/.venv/bin"
+ExecStart=/root/crossposting/.venv/bin/python -m main
+Restart=always
+RestartSec=10
+SyslogIdentifier=crosspost
+
+[Install]
+WantedBy=multi-user.target
