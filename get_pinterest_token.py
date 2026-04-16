@@ -8,14 +8,15 @@
   1. В .env прописать:
        PINTEREST_APP_ID=1562168
        PINTEREST_APP_SECRET=твой_секрет
-  2. В настройках приложения на developers.pinterest.com добавить
-     Redirect URI: http://localhost:8088/callback
+  2. В настройках приложения на developers.pinterest.com → Redirect links добавить:
+       https://localhost/callback
 
 После запуска:
-  - Скрипт откроет ссылку для авторизации
-  - После подтверждения токены сохранятся в /root/pinterest_token.json
-  - access_token действует 30 дней, refresh_token — 1 год
-  - pinterest.py автоматически обновляет токен через refresh_token
+  - Скрипт покажет ссылку для авторизации
+  - После подтверждения браузер перенаправит на https://localhost/callback?code=...
+    (страница не откроется — это нормально)
+  - Скопируйте полный URL из адресной строки и вставьте в терминал
+  - Токены сохранятся в /root/pinterest_token.json
 """
 
 import os
@@ -23,7 +24,6 @@ import json
 import base64
 import asyncio
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import httpx
 from dotenv import load_dotenv
@@ -32,30 +32,9 @@ load_dotenv()
 
 APP_ID = os.getenv("PINTEREST_APP_ID")
 APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
-REDIRECT_URI = "http://localhost:8088/callback"
+REDIRECT_URI = "https://localhost/callback"
 TOKEN_FILE = "/root/pinterest_token.json"
 SCOPES = "boards:read,boards:write,pins:read,pins:write,user_accounts:read"
-
-_auth_code = None
-
-
-class _CallbackHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        global _auth_code
-        params = parse_qs(urlparse(self.path).query)
-        if "code" in params:
-            _auth_code = params["code"][0]
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write("✅ Авторизация прошла успешно! Вкладку можно закрыть.".encode())
-        else:
-            self.send_response(400)
-            self.end_headers()
-            error = params.get("error", ["unknown"])[0]
-            self.wfile.write(f"❌ Ошибка: {error}".encode())
-
-    def log_message(self, *args):
-        pass
 
 
 async def exchange_code(code: str) -> dict:
@@ -93,34 +72,36 @@ async def main():
     print("\n" + "=" * 60)
     print("Pinterest OAuth — получение токенов")
     print("=" * 60)
+
     print("\nШаг 1. Убедитесь, что в настройках приложения на")
-    print("       developers.pinterest.com добавлен Redirect URI:")
+    print("       developers.pinterest.com → Redirect links добавлено:")
     print(f"       {REDIRECT_URI}")
+
     print("\nШаг 2. Откройте эту ссылку в браузере:\n")
-    print(f"  {auth_url}\n")
+    print(f"  {auth_url}")
 
     try:
         webbrowser.open(auth_url)
-        print("(Браузер открыт автоматически)")
     except Exception:
         pass
 
-    print("\nОжидаю подтверждения (до 2 минут)...\n")
+    print("\nШаг 3. Подтвердите доступ.")
+    print("       Браузер попытается открыть https://localhost/callback?code=...")
+    print("       Страница не загрузится — это нормально.")
+    print("       Скопируйте ПОЛНЫЙ URL из адресной строки браузера.\n")
 
-    server = HTTPServer(("localhost", 8088), _CallbackHandler)
-    server.timeout = 10
+    redirect_url = input("Вставьте URL сюда: ").strip()
 
-    for _ in range(12):  # 12 × 10s = 120s
-        server.handle_request()
-        if _auth_code:
-            break
+    params = parse_qs(urlparse(redirect_url).query)
+    code = params.get("code", [None])[0]
 
-    if not _auth_code:
-        print("❌ Время ожидания истекло. Попробуйте снова.")
+    if not code:
+        print(f"❌ Не удалось найти code в URL: {redirect_url}")
+        print("   Убедитесь, что скопировали полный URL с параметром ?code=...")
         return
 
-    print("✅ Код получен, обмениваю на токен...")
-    tokens = await exchange_code(_auth_code)
+    print(f"\n✅ Код получен, обмениваю на токен...")
+    tokens = await exchange_code(code)
 
     if "access_token" not in tokens:
         print(f"❌ Не удалось получить токен: {tokens}")
@@ -129,7 +110,6 @@ async def main():
     import time
     tokens["obtained_at"] = int(time.time())
 
-    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         json.dump(tokens, f, indent=2)
 
@@ -139,8 +119,7 @@ async def main():
     print(f"\n✅ Токены сохранены в {TOKEN_FILE}")
     print(f"   access_token  : действует {expires_days} дней")
     print(f"   refresh_token : действует {refresh_days} дней")
-    print("\nТеперь можно запускать бота — pinterest.py будет")
-    print("использовать API и автоматически обновлять токен.\n")
+    print("\nБот будет использовать API и автоматически обновлять токен.\n")
 
 
 if __name__ == "__main__":
