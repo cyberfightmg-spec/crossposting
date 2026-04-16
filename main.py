@@ -94,61 +94,29 @@ async def webhook_handler(request: Request) -> JSONResponse:
 
 carousel_cache = {}
 carousel_lock = asyncio.Lock()
-pending_carousels = {}
-pending_lock = asyncio.Lock()
+carousel_tasks = {}
 
 
-async def merge_carousel_updates(channel_post: dict) -> dict:
-    """Объединяет все части карусели в один пост"""
-    import time
-    
-    media_group_id = channel_post.get("media_group_id")
-    
+async def _fire_carousel(media_group_id: str):
+    """Фоновая задача: ждёт 5 секунд после первого фото, затем мёрджит и постит карусель"""
+    await asyncio.sleep(5.0)
+
     async with carousel_lock:
-        if media_group_id:
-            if media_group_id not in carousel_cache:
-                carousel_cache[media_group_id] = {"parts": [], "start_time": time.time()}
-            carousel_cache[media_group_id]["parts"].append(channel_post)
-            return None
-        else:
-            return channel_post
+        if media_group_id not in carousel_cache:
+            return
+        entry = carousel_cache.pop(media_group_id)
+        carousel_tasks.pop(media_group_id, None)
 
+    parts = entry["parts"]
+    print(f"[CAROUSEL] Firing {media_group_id}: {len(parts)} parts collected")
 
-async def wait_for_carousel(media_group_id: str, timeout: float = 60.0) -> dict:
-    """Ожидает полной карусели и возвращает объединённый пост"""
-    import time
-    
-    start = time.time()
-    print(f"[MERGE] Waiting for carousel (timeout: {timeout}s)")
-    
-    while time.time() - start < timeout:
-        await asyncio.sleep(2)
-        
-        async with carousel_lock:
-            if media_group_id in carousel_cache:
-                parts = carousel_cache[media_group_id]["parts"]
-                elapsed = int(time.time() - start)
-                print(f"[MERGE] {elapsed}s - buffered {len(parts)} parts")
-                
-                if elapsed >= timeout:
-                    merged = merge_parts(carousel_cache.pop(media_group_id)["parts"])
-                    return merged
-            else:
-                await asyncio.sleep(2)
-                async with carousel_lock:
-                    if media_group_id in carousel_cache:
-                        parts = carousel_cache[media_group_id]["parts"]
-                        merged = merge_parts(parts)
-                        carousel_cache.pop(media_group_id, None)
-                        print(f"[MERGE] Final merge with {len(parts)} parts")
-                        return merged
-                return None
-    
-    async with carousel_lock:
-        if media_group_id in carousel_cache:
-            merged = merge_parts(carousel_cache.pop(media_group_id)["parts"])
-            return merged
-    return None
+    try:
+        merged = merge_parts(parts)
+        await _do_crosspost(merged)
+    except Exception as e:
+        import traceback
+        print(f"[CAROUSEL ERROR] {media_group_id}: {e}")
+        traceback.print_exc()
 
 
 def merge_parts(parts: list) -> dict:
@@ -193,30 +161,36 @@ def merge_parts(parts: list) -> dict:
 
 
 async def crosspost(update: dict) -> dict:
-    """Главный router: определяет тип контента и публикует на всех платформах"""
-    result = {"status": "ok", "platforms": {}, "errors": []}
+    """Router: буферизует карусели, остальной контент публикует сразу"""
     channel_post = update.get("channel_post", {})
-    
     media_group_id = channel_post.get("media_group_id")
-    
+
     if media_group_id:
-        merged = await merge_carousel_updates(channel_post)
-        if merged is None:
-            await asyncio.sleep(0.5)
-            merged = await wait_for_carousel(media_group_id)
-            if merged is None:
-                return {"status": "buffering"}
-        channel_post = merged
-    
+        async with carousel_lock:
+            if media_group_id not in carousel_cache:
+                carousel_cache[media_group_id] = {"parts": []}
+                task = asyncio.create_task(_fire_carousel(media_group_id))
+                carousel_tasks[media_group_id] = task
+                print(f"[CAROUSEL] Started buffering {media_group_id}")
+            carousel_cache[media_group_id]["parts"].append(channel_post)
+            count = len(carousel_cache[media_group_id]["parts"])
+            print(f"[CAROUSEL] Buffered part {count} for {media_group_id}")
+        return {"status": "buffering"}
+
+    return await _do_crosspost(channel_post)
+
+
+async def _do_crosspost(channel_post: dict) -> dict:
+    """Определяет тип контента и публикует на всех платформах"""
+    result = {"status": "ok", "platforms": {}, "errors": []}
+
     content_type = detect_content_type(channel_post)
-    
     photos = channel_post.get("photo", [])
-    file_ids = [p["file_id"] for p in photos]
-    print(f"[DEBUG] Total photos in carousel: {len(photos)}, file_ids: {len(set(file_ids))} unique")
+    print(f"[DEBUG] content_type={content_type}, photos={len(photos)}, merged={channel_post.get('_merged', False)}")
 
     if content_type == "TEXT":
         text = channel_post.get("text", "")
-        
+
         async def run_vk():
             if not ENABLED_PLATFORMS["vk"]:
                 result["platforms"]["vk"] = "disabled"
@@ -244,7 +218,7 @@ async def crosspost(update: dict) -> dict:
 
         async def run_youtube():
             try:
-                adapted = await adapt_youtube(text)
+                await adapt_youtube(text)
                 result["platforms"]["youtube"] = "logged"
             except Exception as e:
                 result["errors"].append(f"youtube: {str(e)}")
@@ -252,13 +226,16 @@ async def crosspost(update: dict) -> dict:
         await asyncio.gather(run_vk(), run_dzen(), run_youtube())
 
     elif content_type == "SLIDES":
-        photos = channel_post.get("photo", [])
         file_ids = [p["file_id"] for p in photos]
         caption = channel_post.get("caption", "")
-        
+        print(f"[DEBUG] SLIDES: {len(file_ids)} photos, {len(set(file_ids))} unique file_ids")
+
         carousel = await process_carousel(file_ids)
-        
+
         async def run_vk():
+            if not ENABLED_PLATFORMS["vk"]:
+                result["platforms"]["vk"] = "disabled"
+                return
             try:
                 vk_result = await post_photo_vk(carousel["local_paths"], caption, carousel=True)
                 if vk_result.get("response"):
@@ -275,7 +252,7 @@ async def crosspost(update: dict) -> dict:
                 result["platforms"]["pinterest"] = "disabled"
                 return
             try:
-                pinterest_result = await post_to_pinterest(carousel["local_paths"], caption)
+                await post_to_pinterest(carousel["local_paths"], caption)
                 result["platforms"]["pinterest"] = "ok"
             except Exception as e:
                 result["platforms"]["pinterest"] = "error"
@@ -286,29 +263,25 @@ async def crosspost(update: dict) -> dict:
                 result["platforms"]["dzen"] = "disabled"
                 return
             try:
-                dzen_result = await post_dzen({
-                    "urls": carousel["dzen"],
-                    "caption": caption
-                })
+                dzen_result = await post_dzen({"urls": carousel["dzen"], "caption": caption})
                 result["platforms"]["dzen"] = "ok" if dzen_result.get("status") == "ok" else "error"
             except Exception as e:
                 result["platforms"]["dzen"] = "error"
                 result["errors"].append(f"dzen: {str(e)}")
 
         await asyncio.gather(run_vk(), run_pinterest(), run_dzen())
-        
         await cleanup_carousel(carousel["carousel_id"])
-        
-        with open("/root/crossposting/last_offset.json", "w") as f:
-            json.dump({"offset": 0}, f)
 
     elif content_type == "PHOTO":
         file_id = channel_post["photo"][-1]["file_id"]
         caption = channel_post.get("caption", "")
-        
+
         carousel = await process_carousel([file_id])
-        
+
         async def run_vk():
+            if not ENABLED_PLATFORMS["vk"]:
+                result["platforms"]["vk"] = "disabled"
+                return
             try:
                 vk_result = await post_photo_vk(carousel["local_paths"], caption)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
@@ -321,14 +294,13 @@ async def crosspost(update: dict) -> dict:
                 result["platforms"]["pinterest"] = "disabled"
                 return
             try:
-                pinterest_result = await post_to_pinterest(carousel["local_paths"], caption)
+                await post_to_pinterest(carousel["local_paths"], caption)
                 result["platforms"]["pinterest"] = "ok"
             except Exception as e:
                 result["platforms"]["pinterest"] = "error"
                 result["errors"].append(f"pinterest: {str(e)}")
 
         await asyncio.gather(run_vk(), run_pinterest())
-        
         await cleanup_carousel(carousel["carousel_id"])
 
     if result["errors"]:
