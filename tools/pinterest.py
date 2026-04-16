@@ -13,6 +13,7 @@ PINTEREST_USERNAME = os.getenv("PINTEREST_USERNAME")
 PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME")
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
+PINTEREST_ACCESS_TOKEN = os.getenv("PINTEREST_ACCESS_TOKEN")  # ручной токен из dev portal
 CRED_ROOT = "/root/crossposting/pinterest_creds"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TOKEN_FILE = "/root/pinterest_token.json"
@@ -66,19 +67,30 @@ async def _refresh_access_token() -> str | None:
 
 
 async def load_token() -> str | None:
-    """Возвращает действующий access_token, при необходимости обновляет его."""
+    """
+    Возвращает действующий access_token. Приоритет:
+    1. PINTEREST_ACCESS_TOKEN в .env (токен из developer portal — используется как есть)
+    2. TOKEN_FILE (/root/pinterest_token.json) — с проверкой срока и авторефрешем
+    """
+    # 1. Токен из переменной окружения — доверяем как есть, без проверки срока
+    if PINTEREST_ACCESS_TOKEN:
+        return PINTEREST_ACCESS_TOKEN
+
+    # 2. Токен из файла (получен через OAuth-скрипт)
     data = _read_token_file()
     token = data.get("access_token")
     if not token:
         return None
 
-    # Проверяем, не истёк ли токен (expires_in в секундах, с запасом 1 день)
-    obtained_at = data.get("obtained_at", 0)
-    expires_in = data.get("expires_in", 2592000)  # default 30 days
-    if time.time() > obtained_at + expires_in - 86400:
+    # Если токен сохранён без obtained_at (например, вставлен вручную) — доверяем
+    if not data.get("obtained_at"):
+        return token
+
+    # Проверяем срок: пробуем рефреш за 1 день до истечения
+    expires_in = data.get("expires_in", 2592000)  # default 30 дней
+    if time.time() > data["obtained_at"] + expires_in - 86400:
         print("[PINTEREST] Access token expired, refreshing...")
-        refreshed = await _refresh_access_token()
-        return refreshed  # None если refresh тоже не удался
+        return await _refresh_access_token()  # None если refresh не удался
 
     return token
 
