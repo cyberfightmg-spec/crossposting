@@ -1,7 +1,7 @@
 import os
 import io
 import json
-import asyncio
+import time
 import httpx
 from PIL import Image
 from playwright.async_api import async_playwright
@@ -13,76 +13,27 @@ PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME")
 CRED_ROOT = "/root/crossposting/pinterest_creds"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TOKEN_FILE = "/root/pinterest_token.json"
+COOKIE_FILE = os.path.join(CRED_ROOT, "cookies.json")
+COOKIE_TTL = 15 * 24 * 3600  # 15 дней
 
 
 def load_token() -> str | None:
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE) as f:
-            data = json.load(f)
-            return data.get("access_token")
+            return json.load(f).get("access_token")
     return None
 
 
-def get_pinterest_client():
-    os.makedirs(CRED_ROOT, exist_ok=True)
-    cookie_file = os.path.join(CRED_ROOT, "cookies.json")
-    token_file = os.path.join(CRED_ROOT, "token.json")
-
-    async def login():
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-
-            await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
-
-            await page.evaluate(f"""
-                document.querySelector('input[type="email"], input[name="email"], input[id="email"]').value = '{PINTEREST_EMAIL}';
-                document.querySelector('input[type="password"], input[name="password"], input[id="password"]').value = '{PINTEREST_PASSWORD}';
-            """)
-            
-            await page.locator('button[type="submit"], button[aria-label="Log in"]').first.click()
-            await page.wait_for_timeout(5000)
-
-            cookies = await context.cookies()
-            with open(cookie_file, "w") as f:
-                json.dump(cookies, f)
-
-            storage = await page.evaluate("() => window.localStorage")
-            with open(token_file, "w") as f:
-                json.dump(storage, f)
-
-            await browser.close()
-            return True
-
-    if os.path.exists(cookie_file):
-        mtime = os.path.getmtime(cookie_file)
-        import time
-        if time.time() - mtime < 15 * 24 * 3600:
-            return {"status": "using_cached"}
-
-    return asyncio.run(login())
-
-
 def resize_for_pinterest(image_bytes: bytes) -> bytes:
+    """Приводим изображение к портретному 2:3 (1000×1500) для карусели."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    w, h = img.size
-
-    if h >= w:
-        target_w, target_h = 1000, 1500
-    else:
-        target_w, target_h = 1500, 1000
-
+    target_w, target_h = 1000, 1500
     img.thumbnail((target_w, target_h), Image.LANCZOS)
     canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
-    offset_x = (target_w - img.width) // 2
-    offset_y = (target_h - img.height) // 2
-    canvas.paste(img, (offset_x, offset_y))
-
-    output = io.BytesIO()
-    canvas.save(output, format="JPEG", quality=95)
-    return output.getvalue()
+    canvas.paste(img, ((target_w - img.width) // 2, (target_h - img.height) // 2))
+    out = io.BytesIO()
+    canvas.save(out, format="JPEG", quality=95)
+    return out.getvalue()
 
 
 async def adapt_pinterest_text(text: str) -> dict:
@@ -99,7 +50,7 @@ async def adapt_pinterest_text(text: str) -> dict:
                         "DESC: до 500 символов, описание + 5 хэштегов\n"
                         "Формат строго:\nTITLE: ...\nDESC: ..."
                     )},
-                    {"role": "user", "content": text}
+                    {"role": "user", "content": text or "Новый пост"}
                 ],
                 "temperature": 0.9
             },
@@ -107,10 +58,204 @@ async def adapt_pinterest_text(text: str) -> dict:
         )
     content = r.json()["choices"][0]["message"]["content"]
     lines = [l for l in content.strip().split("\n") if l.strip()]
-    title = lines[0].replace("TITLE:", "").strip()
+    title = lines[0].replace("TITLE:", "").strip() if lines else ""
     desc = lines[1].replace("DESC:", "").strip() if len(lines) > 1 else ""
     return {"title": title, "description": desc}
 
+
+# ─── Playwright (email/password) ──────────────────────────────────────────────
+
+async def _login(page, context) -> bool:
+    """Авторизация через форму. Сохраняет куки. Возвращает True при успехе."""
+    print("[PINTEREST] Opening login page...")
+    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(2000)
+
+    email_sel = 'input[id="email"], input[name="email"], input[type="email"]'
+    await page.locator(email_sel).first.wait_for(state="visible", timeout=15000)
+    await page.locator(email_sel).first.fill(PINTEREST_EMAIL)
+    await page.wait_for_timeout(400)
+
+    pwd_sel = 'input[id="password"], input[name="password"], input[type="password"]'
+    await page.locator(pwd_sel).first.fill(PINTEREST_PASSWORD)
+    await page.wait_for_timeout(400)
+
+    await page.locator('button[type="submit"]').first.click()
+    await page.wait_for_timeout(7000)
+
+    if "login" in page.url:
+        print("[PINTEREST] Login failed — still on login page")
+        return False
+
+    print(f"[PINTEREST] Login OK → {page.url}")
+    os.makedirs(CRED_ROOT, exist_ok=True)
+    with open(COOKIE_FILE, "w") as f:
+        json.dump(await context.cookies(), f)
+    return True
+
+
+async def _ensure_logged_in(page, context) -> bool:
+    """Загружает куки или выполняет логин. Возвращает True если авторизованы."""
+    cookie_ok = False
+    if os.path.exists(COOKIE_FILE) and time.time() - os.path.getmtime(COOKIE_FILE) < COOKIE_TTL:
+        with open(COOKIE_FILE) as f:
+            await context.add_cookies(json.load(f))
+        cookie_ok = True
+        print("[PINTEREST] Loaded cached cookies")
+
+    await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(3000)
+
+    logged_out = (
+        "login" in page.url
+        or await page.locator('[data-test-id="header-login-button"]').count() > 0
+        or not cookie_ok
+    )
+
+    if logged_out:
+        print("[PINTEREST] Not authenticated, logging in...")
+        return await _login(page, context)
+
+    return True
+
+
+async def post_to_pinterest_playwright(image_paths: list, text: str) -> dict:
+    """
+    Публикует пин или карусель через Playwright.
+    При 2+ изображениях Pinterest автоматически создаёт карусель.
+    """
+    os.makedirs(CRED_ROOT, exist_ok=True)
+
+    # Ресайзим и сохраняем во временные файлы
+    tmp_paths = []
+    for i, path in enumerate(image_paths[:5]):
+        with open(path, "rb") as f:
+            resized = resize_for_pinterest(f.read())
+        tmp_path = f"/tmp/pinterest_pin_{i}.jpg"
+        with open(tmp_path, "wb") as f:
+            f.write(resized)
+        tmp_paths.append(tmp_path)
+
+    print(f"[PINTEREST] Prepared {len(tmp_paths)} image(s)")
+    adapted = await adapt_pinterest_text(text)
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                )
+            )
+            page = await context.new_page()
+
+            # Авторизация
+            if not await _ensure_logged_in(page, context):
+                await browser.close()
+                return {"status": "error", "error": "Pinterest login failed"}
+
+            # Переходим в конструктор пинов
+            print("[PINTEREST] Opening pin builder...")
+            await page.goto(
+                "https://www.pinterest.com/pin-builder/",
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
+            await page.wait_for_timeout(4000)
+
+            # Загружаем изображения
+            file_input = page.locator('input[type="file"]').first
+            await file_input.wait_for(state="attached", timeout=20000)
+            await file_input.set_input_files(tmp_paths)
+            print("[PINTEREST] Files submitted, waiting for preview...")
+            await page.wait_for_timeout(6000)
+
+            # Если загружено 2+ файлов — Pinterest покажет выбор типа (карусель/коллаж).
+            # Ищем кнопку «Carousel» и кликаем по ней, если она есть.
+            carousel_btn = page.locator(
+                'button:has-text("Carousel"), '
+                '[data-test-id="carousel-type-button"], '
+                'div[role="button"]:has-text("Carousel")'
+            ).first
+            if await carousel_btn.count() > 0:
+                await carousel_btn.click()
+                await page.wait_for_timeout(2000)
+                print("[PINTEREST] Carousel mode selected")
+
+            # Заголовок
+            title_sel = (
+                '[data-test-id="pin-draft-title"] textarea, '
+                '[data-test-id="pin-draft-title"] input, '
+                'textarea[placeholder*="itle"], '
+                'input[placeholder*="itle"]'
+            )
+            title_el = page.locator(title_sel).first
+            if await title_el.count() > 0:
+                await title_el.click()
+                await title_el.fill(adapted["title"][:100])
+                print(f"[PINTEREST] Title: {adapted['title'][:50]}...")
+
+            # Описание
+            desc_sel = (
+                '[data-test-id="pin-draft-description"] textarea, '
+                'textarea[placeholder*="escription"], '
+                'textarea[placeholder*="ell everyone"]'
+            )
+            desc_el = page.locator(desc_sel).first
+            if await desc_el.count() > 0:
+                await desc_el.click()
+                await desc_el.fill(adapted["description"][:500])
+                print("[PINTEREST] Description set")
+
+            # Выбор доски
+            if PINTEREST_BOARD:
+                board_btn = page.locator('[data-test-id="board-dropdown-select-button"]').first
+                if await board_btn.count() > 0:
+                    await board_btn.click()
+                    await page.wait_for_timeout(1500)
+                    # Пробуем найти доску по тексту
+                    board_opt = page.locator(
+                        f'[data-test-id="board-row"] >> text="{PINTEREST_BOARD}"'
+                    ).first
+                    if await board_opt.count() == 0:
+                        board_opt = page.locator(f'text="{PINTEREST_BOARD}"').first
+                    if await board_opt.count() > 0:
+                        await board_opt.click()
+                        await page.wait_for_timeout(1000)
+                        print(f"[PINTEREST] Board selected: {PINTEREST_BOARD}")
+
+            # Публикуем
+            publish_sel = (
+                '[data-test-id="board-dropdown-save-button"], '
+                'button[data-test-id="save-pin-button"], '
+                'button:has-text("Publish"), '
+                'button:has-text("Save")'
+            )
+            publish_btn = page.locator(publish_sel).first
+            await publish_btn.wait_for(state="visible", timeout=15000)
+            await publish_btn.click()
+            await page.wait_for_timeout(6000)
+
+            print(f"[PINTEREST] Done. URL: {page.url}")
+            await browser.close()
+
+    finally:
+        for p in tmp_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    return {"status": "ok", "method": "playwright"}
+
+
+# ─── Pinterest API (если есть access token) ───────────────────────────────────
 
 async def get_board_id_by_name(token: str, board_name: str) -> str | None:
     async with httpx.AsyncClient() as client:
@@ -120,14 +265,13 @@ async def get_board_id_by_name(token: str, board_name: str) -> str | None:
             params={"page_size": 100},
             timeout=15
         )
-        boards = r.json().get("items", [])
-        for board in boards:
+        for board in r.json().get("items", []):
             if board["name"].lower() == board_name.lower():
                 return board["id"]
     return None
 
 
-async def upload_single_image(image_bytes: bytes, token: str) -> str:
+async def _upload_image_api(image_bytes: bytes, token: str) -> str:
     resized = resize_for_pinterest(image_bytes)
     async with httpx.AsyncClient() as client:
         reg = await client.post(
@@ -137,155 +281,63 @@ async def upload_single_image(image_bytes: bytes, token: str) -> str:
             timeout=15
         )
         data = reg.json()
-        upload_url = data["upload_url"]
-        media_id = data["media_id"]
-        upload_params = data["upload_parameters"]
-
-        files = {"file": ("image.jpg", resized, "image/jpeg")}
-        await client.post(upload_url, data=upload_params, files=files, timeout=45)
-    return media_id
-
-
-async def post_single_pin_api(image_bytes: bytes, text: str, token: str, board_id: str) -> dict:
-    adapted = await adapt_pinterest_text(text)
-    media_id = await upload_single_image(image_bytes, token)
-
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            "https://api.pinterest.com/v5/pins",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "board_id": board_id,
-                "title": adapted["title"],
-                "description": adapted["description"],
-                "link": "https://t.me/+jhUtJ494uvtlYjhi",
-                "media_source": {
-                    "source_type": "media_id",
-                    "media_id": media_id
-                }
-            },
-            timeout=20
+        await client.post(
+            data["upload_url"],
+            data=data["upload_parameters"],
+            files={"file": ("image.jpg", resized, "image/jpeg")},
+            timeout=45
         )
-    return r.json()
+    return data["media_id"]
 
 
-async def post_carousel_pin_api(images_bytes: list, text: str, token: str, board_id: str) -> dict:
+async def _post_pin_api(images_bytes: list, text: str, token: str, board_id: str) -> dict:
     adapted = await adapt_pinterest_text(text)
-    media_items = []
-    for img_bytes in images_bytes[:5]:
-        media_id = await upload_single_image(img_bytes, token)
-        media_items.append({
-            "title": adapted["title"],
-            "description": adapted["description"],
-            "link": "https://t.me/+jhUtJ494uvtlYjhi",
-            "media_id": media_id
-        })
+    media_ids = [await _upload_image_api(img, token) for img in images_bytes[:5]]
+
+    if len(media_ids) == 1:
+        media_source = {"source_type": "media_id", "media_id": media_ids[0]}
+    else:
+        items = [{"title": adapted["title"], "description": adapted["description"]}
+                 for _ in media_ids]
+        media_source = {
+            "source_type": "multiple_media_ids",
+            "media_ids": media_ids,
+            "items": items
+        }
 
     async with httpx.AsyncClient() as client:
         r = await client.post(
             "https://api.pinterest.com/v5/pins",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            },
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={
                 "board_id": board_id,
                 "title": adapted["title"],
                 "description": adapted["description"],
-                "media_source": {
-                    "source_type": "multiple_media_ids",
-                    "media_ids": [m["media_id"] for m in media_items],
-                    "items": media_items
-                }
+                "media_source": media_source
             },
             timeout=30
         )
     return r.json()
 
 
-async def post_to_pinterest_playwright(images_bytes: list, text: str) -> dict:
-    board_name = PINTEREST_BOARD
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        
-        cookie_file = os.path.join(CRED_ROOT, "cookies.json")
-        if os.path.exists(cookie_file):
-            with open(cookie_file) as f:
-                cookies = json.load(f)
-            await context.add_cookies(cookies)
-        
-        page = await context.new_page()
-        
-        await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=60000)
-        
-        if not await page.locator(".App").first.is_visible():
-            await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
-            await page.locator('input[type="email"], input[name="email"]').first.fill(value=PINTEREST_EMAIL)
-            await page.locator('input[type="password"], input[name="password"]').first.fill(value=PINTEREST_PASSWORD)
-            await page.locator('button[type="submit"]').first.click()
-            await page.wait_for_timeout(5000)
-            
-            cookies = await context.cookies()
-            with open(cookie_file, "w") as f:
-                json.dump(cookies, f)
-        
-        await page.goto(f"https://www.pinterest.com/{PINTEREST_USERNAME}/{board_name.lower()}/", wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(2000)
-        
-        await page.locator('button[aria-label="Add pin"], .RCk').first.click()
-        await page.wait_for_timeout(2000)
-        
-        for i, img_bytes in enumerate(images_bytes[:5]):
-            resized = resize_for_pinterest(img_bytes)
-            with open(f"/tmp/pin_{i}.jpg", "wb") as f:
-                f.write(resized)
-        
-        file_input = page.locator('input[type="file"]')
-        await file_input.set_input_files([f"/tmp/pin_{i}.jpg" for i in range(len(images_bytes[:5]))])
-        await page.wait_for_timeout(3000)
-        
-        title = text[:100] if len(text) > 100 else text
-        await page.locator('textarea[name="title"], input[placeholder*="title"]').first.fill(title)
-        
-        desc = text[:500] if len(text) > 500 else text
-        await page.locator('textarea[name="description"], input[placeholder*="description"]').first.fill(desc)
-        
-        await page.locator('button:has-text("Save"), button[type="submit"]').first.click()
-        await page.wait_for_timeout(5000)
-        
-        await browser.close()
-        
-    return {"status": "ok", "method": "playwright"}
+# ─── Главная точка входа ──────────────────────────────────────────────────────
 
-
-async def post_to_pinterest(images_bytes: list, text: str) -> dict:
+async def post_to_pinterest(image_paths: list, text: str) -> dict:
     """
-    Постинг в Pinterest:
-    1. Сначала пробуем через API (msp_pinterest)
-    2. Если токена нет - используем Playwright
+    Публикует пин или карусель в Pinterest.
+    image_paths — список локальных путей к файлам.
+    Если есть API-токен — использует API, иначе Playwright (email/password).
     """
     token = load_token()
-    board_name = PINTEREST_BOARD
-    
+
     if token:
         try:
-            board_id = await get_board_id_by_name(token, board_name)
-            if not board_id:
-                return await post_to_pinterest_playwright(images_bytes, text)
-            
-            if len(images_bytes) == 1:
-                result = await post_single_pin_api(images_bytes[0], text, token, board_id)
-            else:
-                result = await post_carousel_pin_api(images_bytes, text, token, board_id)
-            
-            return {"status": "ok", "method": "api", "result": result}
+            board_id = await get_board_id_by_name(token, PINTEREST_BOARD)
+            if board_id:
+                images_bytes = [open(p, "rb").read() for p in image_paths]
+                result = await _post_pin_api(images_bytes, text, token, board_id)
+                return {"status": "ok", "method": "api", "result": result}
         except Exception as e:
-            print(f"Pinterest API error: {e}, falling back to playwright")
-    
-    return await post_to_pinterest_playwright(images_bytes, text)
+            print(f"[PINTEREST] API error: {e}, falling back to Playwright")
+
+    return await post_to_pinterest_playwright(image_paths, text)
