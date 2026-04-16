@@ -2,6 +2,7 @@ import os
 import io
 import json
 import time
+import base64
 import httpx
 from PIL import Image
 from playwright.async_api import async_playwright
@@ -10,6 +11,8 @@ PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
 PINTEREST_USERNAME = os.getenv("PINTEREST_USERNAME")
 PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME")
+PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
+PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 CRED_ROOT = "/root/crossposting/pinterest_creds"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TOKEN_FILE = "/root/pinterest_token.json"
@@ -17,11 +20,67 @@ COOKIE_FILE = os.path.join(CRED_ROOT, "cookies.json")
 COOKIE_TTL = 15 * 24 * 3600  # 15 дней
 
 
-def load_token() -> str | None:
+def _read_token_file() -> dict:
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE) as f:
-            return json.load(f).get("access_token")
+            return json.load(f)
+    return {}
+
+
+def _save_token_file(data: dict):
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+async def _refresh_access_token() -> str | None:
+    """Обновляет access_token через refresh_token. Возвращает новый токен или None."""
+    data = _read_token_file()
+    refresh_token = data.get("refresh_token")
+    if not refresh_token or not PINTEREST_APP_ID or not PINTEREST_APP_SECRET:
+        return None
+
+    credentials = base64.b64encode(f"{PINTEREST_APP_ID}:{PINTEREST_APP_SECRET}".encode()).decode()
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.pinterest.com/v5/oauth/token",
+                headers={
+                    "Authorization": f"Basic {credentials}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                timeout=20,
+            )
+            tokens = r.json()
+
+        if "access_token" in tokens:
+            tokens.setdefault("refresh_token", refresh_token)  # сохраняем старый если не вернули новый
+            tokens["obtained_at"] = int(time.time())
+            _save_token_file(tokens)
+            print("[PINTEREST] Access token refreshed")
+            return tokens["access_token"]
+    except Exception as e:
+        print(f"[PINTEREST] Token refresh failed: {e}")
     return None
+
+
+async def load_token() -> str | None:
+    """Возвращает действующий access_token, при необходимости обновляет его."""
+    data = _read_token_file()
+    token = data.get("access_token")
+    if not token:
+        return None
+
+    # Проверяем, не истёк ли токен (expires_in в секундах, с запасом 1 день)
+    obtained_at = data.get("obtained_at", 0)
+    expires_in = data.get("expires_in", 2592000)  # default 30 days
+    if time.time() > obtained_at + expires_in - 86400:
+        print("[PINTEREST] Access token expired, refreshing...")
+        refreshed = await _refresh_access_token()
+        return refreshed  # None если refresh тоже не удался
+
+    return token
 
 
 def resize_for_pinterest(image_bytes: bytes) -> bytes:
@@ -328,7 +387,7 @@ async def post_to_pinterest(image_paths: list, text: str) -> dict:
     image_paths — список локальных путей к файлам.
     Если есть API-токен — использует API, иначе Playwright (email/password).
     """
-    token = load_token()
+    token = await load_token()
 
     if token:
         try:
