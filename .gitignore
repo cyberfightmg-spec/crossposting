@@ -1,0 +1,5 @@
+.venv/
+.env
+pinterest_creds/
+*.log
+last_offset.json
