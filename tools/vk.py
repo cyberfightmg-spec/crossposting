@@ -46,68 +46,77 @@ async def create_album_vk(title: str) -> str:
 
 
 async def upload_photos_to_album(images: List[Union[str, bytes]], album_id: int) -> List[str]:
-    """Загрузить фото в альбом VK и вернуть список photo_ids"""
-    import time
+    """
+    Загружает все фото в альбом VK пакетами по 5 штук (лимит VK на один upload-запрос).
+    Возвращает список строк вида photo{owner_id}_{id}.
+    """
     photo_ids = []
-    
-    for i, img in enumerate(images[:10]):
-        async with httpx.AsyncClient() as client:
-            upload_server = await client.post(f"{VK_API}/photos.getWallUploadServer", data={
+    group_id = VK_OWNER_ID.lstrip("-")
+    all_images = images[:10]  # VK wall post: max 10 вложений
+
+    async with httpx.AsyncClient() as client:
+        for batch_start in range(0, len(all_images), 5):
+            batch = all_images[batch_start:batch_start + 5]
+
+            # 1. Получаем URL для загрузки в альбом
+            r = await client.post(f"{VK_API}/photos.getUploadServer", data={
                 "access_token": VK_TOKEN,
-                "group_id": VK_OWNER_ID.lstrip("-"),
+                "album_id": album_id,
+                "group_id": group_id,
                 "v": VK_V
             }, timeout=15)
-            
-            upload_url = upload_server.json()["response"]["upload_url"]
-            img_bytes = load_image(img)
-            files = {"photo": (f"img{i}.jpg", img_bytes, "image/jpeg")}
-            
-            upload_res = await client.post(upload_url, files=files, timeout=60)
+            upload_url = r.json()["response"]["upload_url"]
+
+            # 2. Загружаем весь пакет за один HTTP-запрос (file1, file2, ...)
+            files = {}
+            for i, img in enumerate(batch):
+                img_bytes = load_image(img)
+                files[f"file{i + 1}"] = (f"photo_{batch_start + i}.jpg", img_bytes, "image/jpeg")
+
+            upload_res = await client.post(upload_url, files=files, timeout=120)
             upload_data = upload_res.json()
-            print(f"[VK] Upload {i+1}: {upload_data}")
-            
-            saved = await client.post(f"{VK_API}/photos.saveWallPhoto", data={
+            print(f"[VK] Uploaded batch {batch_start}–{batch_start + len(batch) - 1}: {upload_data}")
+
+            # 3. Сохраняем пакет в альбом
+            save_res = await client.post(f"{VK_API}/photos.save", data={
                 "access_token": VK_TOKEN,
-                "group_id": VK_OWNER_ID.lstrip("-"),
-                "photo": upload_data.get("photo", ""),
+                "album_id": album_id,
+                "group_id": group_id,
                 "server": upload_data.get("server", ""),
+                "photos_list": upload_data.get("photos_list", ""),
                 "hash": upload_data.get("hash", ""),
                 "v": VK_V
             }, timeout=15)
-            
-            result = saved.json()
-            print(f"[VK] Save {i+1}: {result}")
-            
-            if result.get("response"):
-                p = result["response"][0]
-                photo_ids.append(f'photo{p["owner_id"]}_{p["id"]}')
-    
+
+            saved = save_res.json()
+            print(f"[VK] Saved batch {batch_start}: {saved}")
+
+            if saved.get("response"):
+                for p in saved["response"]:
+                    photo_ids.append(f'photo{p["owner_id"]}_{p["id"]}')
+
     return photo_ids
 
 
 async def post_photo_vk(images: List[Union[str, bytes]], caption: str, carousel: bool = True) -> dict:
-    """Загрузить фото в альбом VK, создать пост со ссылками на фото"""
+    """Загружает все фото в альбом VK, затем публикует один пост со всеми вложениями"""
     album_id = int(VK_ALBUM_ID) if VK_ALBUM_ID else None
-    
     if not album_id:
         return {"error": "VK_ALBUM_ID not set"}
-    
+
     photo_ids = await upload_photos_to_album(images, album_id)
-    
+    if not photo_ids:
+        return {"error": "No photos uploaded"}
+
     async with httpx.AsyncClient() as client:
-        data = {
+        r = await client.post(f"{VK_API}/wall.post", data={
             "access_token": VK_TOKEN,
             "owner_id": VK_OWNER_ID,
             "message": caption,
             "attachments": ",".join(photo_ids),
             "from_group": 1,
             "v": VK_V
-        }
-        
-        if carousel and len(photo_ids) > 1:
-            data["primary_attachments_mode"] = "carousel"
-        
-        r = await client.post(f"{VK_API}/wall.post", data=data, timeout=20)
+        }, timeout=20)
         return r.json()
 
 
