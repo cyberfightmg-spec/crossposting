@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import base64
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,12 +10,12 @@ from fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from tools.router import detect_type
 from tools.telegram import send_message, notify_admin, BASE_URL
 from tools.vk import post_text_vk, post_photo_vk
 from tools.dzen import post_dzen
-from tools.pinterest import post_to_pinterest
+from tools.pinterest import post_to_pinterest, _refresh_access_token
 from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
 from tools.carousel import process_carousel, cleanup_carousel
@@ -326,10 +327,95 @@ async def run_polling():
     await start_polling(handle_update, offset)
 
 
+# ─── Pinterest OAuth ──────────────────────────────────────────────────────────
+
+PINTEREST_APP_ID     = os.getenv("PINTEREST_APP_ID")
+PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
+PINTEREST_REDIRECT_URI = os.getenv("PINTEREST_REDIRECT_URI", "")
+PINTEREST_TOKEN_FILE = "/root/pinterest_token.json"
+PINTEREST_SCOPES = "boards:read,boards:write,pins:read,pins:write,user_accounts:read"
+
+
+async def pinterest_auth(request: Request):
+    """Редирект на страницу авторизации Pinterest."""
+    if not PINTEREST_APP_ID or not PINTEREST_REDIRECT_URI:
+        return HTMLResponse(
+            "<h2>❌ Не заданы PINTEREST_APP_ID или PINTEREST_REDIRECT_URI в .env</h2>",
+            status_code=500,
+        )
+    url = (
+        f"https://www.pinterest.com/oauth/"
+        f"?client_id={PINTEREST_APP_ID}"
+        f"&redirect_uri={PINTEREST_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope={PINTEREST_SCOPES}"
+    )
+    return RedirectResponse(url)
+
+
+async def pinterest_callback(request: Request):
+    """Принимает код от Pinterest, обменивает на токены и сохраняет."""
+    import time
+
+    code = request.query_params.get("code")
+    error = request.query_params.get("error")
+
+    if error or not code:
+        return HTMLResponse(f"<h2>❌ Ошибка авторизации: {error or 'нет кода'}</h2>", status_code=400)
+
+    if not PINTEREST_APP_ID or not PINTEREST_APP_SECRET:
+        return HTMLResponse("<h2>❌ Не заданы PINTEREST_APP_ID / PINTEREST_APP_SECRET</h2>", status_code=500)
+
+    credentials = base64.b64encode(f"{PINTEREST_APP_ID}:{PINTEREST_APP_SECRET}".encode()).decode()
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.pinterest.com/v5/oauth/token",
+                headers={
+                    "Authorization": f"Basic {credentials}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": PINTEREST_REDIRECT_URI,
+                },
+                timeout=20,
+            )
+            tokens = r.json()
+    except Exception as e:
+        return HTMLResponse(f"<h2>❌ Ошибка запроса к Pinterest: {e}</h2>", status_code=500)
+
+    if "access_token" not in tokens:
+        return HTMLResponse(f"<h2>❌ Pinterest вернул ошибку: {tokens}</h2>", status_code=400)
+
+    tokens["obtained_at"] = int(time.time())
+    with open(PINTEREST_TOKEN_FILE, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+    expires_days = tokens.get("expires_in", 0) // 86400
+    refresh_days = tokens.get("refresh_token_expires_in", 0) // 86400
+
+    return HTMLResponse(f"""
+    <html><body style="font-family:sans-serif;padding:40px">
+    <h2>✅ Pinterest авторизован!</h2>
+    <p>Токены сохранены на сервере.</p>
+    <ul>
+      <li>access_token действует <b>{expires_days} дней</b></li>
+      <li>refresh_token действует <b>{refresh_days} дней</b></li>
+    </ul>
+    <p>Бот будет автоматически обновлять токен. Эту страницу можно закрыть.</p>
+    </body></html>
+    """)
+
+
 mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(routes=[
     Mount("/mcp", app=mcp_app),
     Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
+    Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
+    Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
 ], lifespan=mcp_app.lifespan)
 
 
