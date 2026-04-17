@@ -82,14 +82,19 @@ async def send_crosspost_notification(channel_post: dict, result: dict) -> None:
     await notify_admin(msg)
 
 
+CHANNEL_CHAT_ID = os.getenv("TELEGRAM_CHANNEL_CHAT_ID", "")
+
+
 async def webhook_handler(request: Request) -> JSONResponse:
-    """Обработка входящих обновлений от Telegram"""
+    """Принимает update от Telegram, сразу возвращает 200, обработку запускает фоном."""
     update = await request.json()
-    
+
     if "channel_post" in update:
-        result = await crosspost(update)
-        return JSONResponse({"ok": True, "result": result})
-    
+        chat_id = str(update["channel_post"].get("chat", {}).get("id", ""))
+        if CHANNEL_CHAT_ID and chat_id != CHANNEL_CHAT_ID:
+            return JSONResponse({"ok": True})
+        asyncio.create_task(crosspost(update))
+
     return JSONResponse({"ok": True})
 
 
@@ -410,21 +415,56 @@ async def pinterest_callback(request: Request):
     """)
 
 
+async def _register_webhook():
+    """Регистрирует webhook в Telegram при старте сервера."""
+    webhook_url = os.getenv("WEBHOOK_URL", "").rstrip("/")
+    if not webhook_url:
+        print("[WEBHOOK] WEBHOOK_URL не задан — webhook не зарегистрирован")
+        return
+    target = f"{webhook_url}/webhook"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/setWebhook",
+                json={"url": target, "drop_pending_updates": False, "max_connections": 40},
+                timeout=10,
+            )
+            result = r.json()
+        if result.get("ok"):
+            print(f"[WEBHOOK] Зарегистрирован: {target}")
+        else:
+            print(f"[WEBHOOK] Ошибка регистрации: {result}")
+    except Exception as e:
+        print(f"[WEBHOOK] Не удалось зарегистрировать: {e}")
+
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    await _register_webhook()
+    async with mcp_app.lifespan(app):
+        yield
+
+
 mcp_app = mcp.http_app(path="/mcp")
-app = Starlette(routes=[
-    Mount("/mcp", app=mcp_app),
-    Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
-    Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
-    Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
-], lifespan=mcp_app.lifespan)
+app = Starlette(
+    routes=[
+        Mount("/mcp", app=mcp_app),
+        Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
+        Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
+        Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
+    ],
+    lifespan=lifespan,
+)
 
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     mode = os.getenv("MODE", "polling")
-    
+
     if mode == "polling":
         asyncio.run(run_polling())
     else:
-        uvicorn.run(app, host="0.0.0.0", port=8080)
+        uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
