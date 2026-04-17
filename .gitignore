@@ -3,3 +3,6 @@
 pinterest_creds/
 *.log
 last_offset.json
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #07090B;
+  --color-surface: #0D1115;
+  --color-surface-2: #11161B;
+  --color-border: rgba(255,255,255,0.06);
+  --color-accent: #00E87A;
+  --color-accent-glow: rgba(0,232,122,0.35);
+  --color-text: #E8EDF2;
+  --color-muted: #7A8A99;
+  --font-sans: "Geist", ui-sans-serif, system-ui;
+  --radius-card: 1.5rem;
+}
+
+@layer base {
+  body {
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+}
