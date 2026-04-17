@@ -231,26 +231,43 @@ async def post_to_pinterest_playwright(image_paths: list, text: str) -> dict:
                 wait_until="domcontentloaded",
                 timeout=60000
             )
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(5000)
 
-            # Загружаем изображения
-            file_input = page.locator('input[type="file"]').first
-            await file_input.wait_for(state="attached", timeout=20000)
-            await file_input.set_input_files(tmp_paths)
+            # Ищем кнопку создания пина (Pinterest часто меняет UI)
+            try:
+                create_btn = page.locator(
+                    'button:has-text("Create Pin"), '
+                    '[data-test-id="create-pin-button"], '
+                    'a[href*="pin-builder"], '
+                    'button[aria-label*="Create"], '
+                    'button[aria-label*="Pin"]'
+                ).first
+                if await create_btn.count() > 0 and await create_btn.is_visible():
+                    await create_btn.click()
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
             print("[PINTEREST] Files submitted, waiting for preview...")
-            await page.wait_for_timeout(6000)
+            await page.wait_for_timeout(10000)
 
             # Если загружено 2+ файлов — Pinterest покажет выбор типа (карусель/коллаж).
-            # Ищем кнопку «Carousel» и кликаем по ней, если она есть.
-            carousel_btn = page.locator(
-                'button:has-text("Carousel"), '
-                '[data-test-id="carousel-type-button"], '
-                'div[role="button"]:has-text("Carousel")'
-            ).first
-            if await carousel_btn.count() > 0:
-                await carousel_btn.click()
-                await page.wait_for_timeout(2000)
-                print("[PINTEREST] Carousel mode selected")
+            # Ищем кнопку "Карусель" (или "Carousel")
+            for btn_sel in [
+                'button:has-text("Carousel"), button:has-text("Карусель")',
+                '[data-test-id="carousel-type-button"]',
+                'div[role="button"]:has-text("Carousel")',
+                'div[role="button"]:has-text("Карусель")'
+            ]:
+                carousel_btn = page.locator(btn_sel).first
+                if await carousel_btn.count() > 0:
+                    try:
+                        await carousel_btn.click()
+                        await page.wait_for_timeout(2000)
+                        print("[PINTEREST] Carousel mode selected")
+                        break
+                    except Exception:
+                        pass
 
             # Заголовок
             title_sel = (
