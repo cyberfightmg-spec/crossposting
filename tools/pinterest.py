@@ -15,6 +15,7 @@ PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME")
 PINTEREST_APP_ID = os.getenv("PINTEREST_APP_ID")
 PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_ACCESS_TOKEN = os.getenv("PINTEREST_ACCESS_TOKEN")  # ручной токен из dev portal
+PINTEREST_API_BASE = "https://api-sandbox.pinterest.com/v5"  # Trial Access = Sandbox
 CRED_ROOT = "/root/crossposting/pinterest_creds"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TOKEN_FILE = "/root/pinterest_token.json"
@@ -296,31 +297,53 @@ async def post_to_pinterest_playwright(image_paths: list, text: str) -> dict:
 
             # Выбор доски
             if PINTEREST_BOARD:
-                board_btn = page.locator('[data-test-id="board-dropdown-select-button"]').first
-                if await board_btn.count() > 0:
-                    await board_btn.click()
-                    await page.wait_for_timeout(1500)
-                    # Пробуем найти доску по тексту
-                    board_opt = page.locator(
-                        f'[data-test-id="board-row"] >> text="{PINTEREST_BOARD}"'
-                    ).first
-                    if await board_opt.count() == 0:
-                        board_opt = page.locator(f'text="{PINTEREST_BOARD}"').first
+                for btn_sel in [
+                    '[data-test-id="board-dropdown-select-button"]',
+                    'button:has-text("Select board")',
+                    '[data-test-id="board-picker-button"]'
+                ]:
+                    board_btn = page.locator(btn_sel).first
+                    if await board_btn.count() > 0 and await board_btn.is_visible():
+                        try:
+                            await board_btn.click()
+                            await page.wait_for_timeout(1500)
+                            break
+                        except Exception:
+                            continue
+                
+                for board_sel in [
+                    f'text="{PINTEREST_BOARD}"',
+                    f'[data-test-id="board-row"]:has-text("{PINTEREST_BOARD}")',
+                    f'button:has-text("{PINTEREST_BOARD}")'
+                ]:
+                    board_opt = page.locator(board_sel).first
                     if await board_opt.count() > 0:
-                        await board_opt.click()
-                        await page.wait_for_timeout(1000)
-                        print(f"[PINTEREST] Board selected: {PINTEREST_BOARD}")
+                        try:
+                            await board_opt.click()
+                            await page.wait_for_timeout(1000)
+                            print(f"[PINTEREST] Board selected: {PINTEREST_BOARD}")
+                            break
+                        except Exception:
+                            continue
 
-            # Публикуем
-            publish_sel = (
-                '[data-test-id="board-dropdown-save-button"], '
-                'button[data-test-id="save-pin-button"], '
-                'button:has-text("Publish"), '
-                'button:has-text("Save")'
-            )
-            publish_btn = page.locator(publish_sel).first
-            await publish_btn.wait_for(state="visible", timeout=15000)
-            await publish_btn.click()
+            # Публикуем - больше селекторов
+            for publish_sel in [
+                '[data-test-id="board-dropdown-save-button"]',
+                'button[data-test-id="save-pin-button"]',
+                'button:has-text("Publish")',
+                'button:has-text("Save")',
+                'button[type="submit"]',
+                '[data-test-id="submit-button"]',
+                'button:has-text("Опубликовать")'
+            ]:
+                publish_btn = page.locator(publish_sel).first
+                if await publish_btn.count() > 0:
+                    try:
+                        await publish_btn.click()
+                        print(f"[PINTEREST] Clicked publish via {publish_sel}")
+                        break
+                    except Exception:
+                        continue
             await page.wait_for_timeout(6000)
 
             print(f"[PINTEREST] Done. URL: {page.url}")
@@ -341,7 +364,7 @@ async def post_to_pinterest_playwright(image_paths: list, text: str) -> dict:
 async def get_board_id_by_name(token: str, board_name: str) -> str | None:
     async with httpx.AsyncClient() as client:
         r = await client.get(
-            "https://api.pinterest.com/v5/boards",
+            f"{PINTEREST_API_BASE}/boards",
             headers={"Authorization": f"Bearer {token}"},
             params={"page_size": 100},
             timeout=15
@@ -356,7 +379,7 @@ async def _upload_image_api(image_bytes: bytes, token: str) -> str:
     resized = resize_for_pinterest(image_bytes)
     async with httpx.AsyncClient() as client:
         reg = await client.post(
-            "https://api.pinterest.com/v5/media",
+            f"{PINTEREST_API_BASE}/media",
             headers={"Authorization": f"Bearer {token}"},
             json={"media_type": "image"},
             timeout=15
@@ -388,7 +411,7 @@ async def _post_pin_api(images_bytes: list, text: str, token: str, board_id: str
 
     async with httpx.AsyncClient() as client:
         r = await client.post(
-            "https://api.pinterest.com/v5/pins",
+            f"{PINTEREST_API_BASE}/pins",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={
                 "board_id": board_id,
