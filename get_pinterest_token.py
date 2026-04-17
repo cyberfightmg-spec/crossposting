@@ -32,7 +32,7 @@ load_dotenv()
 
 APP_ID = os.getenv("PINTEREST_APP_ID")
 APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
-REDIRECT_URI = "https://localhost/callback"
+REDIRECT_URI = "https://sad-trams-push.loca.lt/callback"
 TOKEN_FILE = "/root/pinterest_token.json"
 SCOPES = "boards:read,boards:write,pins:read,pins:write,user_accounts:read"
 
