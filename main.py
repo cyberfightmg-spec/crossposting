@@ -19,6 +19,7 @@ from tools.pinterest import post_to_pinterest, _refresh_access_token
 from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
 from tools.carousel import process_carousel, cleanup_carousel
+from tools.instagram import post_to_instagram
 
 mcp = FastMCP("crosspost-server")
 
@@ -275,7 +276,20 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["dzen"] = "error"
                 result["errors"].append(f"dzen: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_pinterest(), run_dzen())
+        async def run_instagram():
+            if not ENABLED_PLATFORMS["instagram"]:
+                result["platforms"]["instagram"] = "disabled"
+                return
+            try:
+                ig_result = await post_to_instagram(carousel["local_paths"], caption)
+                result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
+                if ig_result.get("status") != "ok":
+                    result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
+            except Exception as e:
+                result["platforms"]["instagram"] = "error"
+                result["errors"].append(f"instagram: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "PHOTO":
@@ -306,7 +320,20 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["pinterest"] = "error"
                 result["errors"].append(f"pinterest: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_pinterest())
+        async def run_instagram():
+            if not ENABLED_PLATFORMS["instagram"]:
+                result["platforms"]["instagram"] = "disabled"
+                return
+            try:
+                ig_result = await post_to_instagram(carousel["local_paths"], caption)
+                result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
+                if ig_result.get("status") != "ok":
+                    result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
+            except Exception as e:
+                result["platforms"]["instagram"] = "error"
+                result["errors"].append(f"instagram: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
 
     if result["errors"]:
