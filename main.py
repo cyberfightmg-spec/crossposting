@@ -17,7 +17,9 @@ from tools.dzen import post_dzen
 from tools.pinterest import post_to_pinterest
 from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
-from tools.carousel import process_carousel, cleanup_carousel
+from tools.carousel import process_carousel, cleanup_carousel, CAROUSELS_DIR
+from tools.instagram import post_photo_instagram, post_carousel_instagram
+from starlette.staticfiles import StaticFiles
 
 mcp = FastMCP("crosspost-server")
 
@@ -269,7 +271,22 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["dzen"] = "error"
                 result["errors"].append(f"dzen: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_pinterest(), run_dzen())
+        async def run_instagram():
+            if not ENABLED_PLATFORMS["instagram"]:
+                result["platforms"]["instagram"] = "disabled"
+                return
+            try:
+                urls = [carousel["urls"][i] for i in sorted(carousel["urls"].keys())]
+                if len(urls) > 1:
+                    insta_result = await post_carousel_instagram(urls, caption)
+                else:
+                    insta_result = await post_photo_instagram(urls[0], caption)
+                result["platforms"]["instagram"] = "ok" if "id" in insta_result else "error"
+            except Exception as e:
+                result["platforms"]["instagram"] = "error"
+                result["errors"].append(f"instagram: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "PHOTO":
@@ -300,7 +317,19 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["pinterest"] = "error"
                 result["errors"].append(f"pinterest: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_pinterest())
+        async def run_instagram():
+            if not ENABLED_PLATFORMS["instagram"]:
+                result["platforms"]["instagram"] = "disabled"
+                return
+            try:
+                urls = [carousel["urls"][i] for i in sorted(carousel["urls"].keys())]
+                insta_result = await post_photo_instagram(urls[0], caption)
+                result["platforms"]["instagram"] = "ok" if "id" in insta_result else "error"
+            except Exception as e:
+                result["platforms"]["instagram"] = "error"
+                result["errors"].append(f"instagram: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
 
     if result["errors"]:
@@ -330,6 +359,7 @@ mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(routes=[
     Mount("/mcp", app=mcp_app),
     Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
+    Mount("/carousels", app=StaticFiles(directory=str(CAROUSELS_DIR)), name="carousels"),
 ], lifespan=mcp_app.lifespan)
 
 

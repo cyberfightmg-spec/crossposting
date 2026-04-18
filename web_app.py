@@ -7,6 +7,9 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__, template_folder='templates', static_folder='static', static_url_path='/static')
 app.secret_key = os.urandom(24)
 
+VERIFY_TOKEN = "mytoken123"
+IG_PAGE_ACCESS_TOKEN = os.getenv("IG_PAGE_ACCESS_TOKEN", "")
+
 APP_ID = os.getenv("PINTEREST_APP_ID", "1562168")
 APP_SECRET = os.getenv("PINTEREST_APP_SECRET", "0ff8c725a29bc17cc240104a7bf925d8db692ac0")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://leaduxai.id/web/pinterest/callback")
@@ -211,6 +214,21 @@ def logout():
 @app.route('/privacy')
 def privacy():
     return render_template('privacy.html')
+
+@app.route('/instagram/webhook', methods=['GET'])
+def ig_webhook_verify():
+    mode = request.args.get('hub.mode')
+    token = request.args.get('hub.verify_token')
+    challenge = request.args.get('hub.challenge')
+    if mode == 'subscribe' and token == VERIFY_TOKEN:
+        return challenge, 200
+    return 'Forbidden', 403
+
+@app.route('/instagram/webhook', methods=['POST'])
+def ig_webhook_handle():
+    data = request.json
+    print(f"Instagram webhook: {data}")
+    return 'OK', 200
 
 if __name__ == '__main__':
     os.makedirs('/root/crossposting/templates', exist_ok=True)

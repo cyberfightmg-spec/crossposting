@@ -80,14 +80,11 @@ async def download_carousel(file_ids: list) -> Tuple[str, list]:
 
 
 async def get_uploaded_urls(carousel_id: str, local_paths: list) -> dict:
-    """
-    Получить публичные URL для скачанных изображений.
-    Для продакшена здесь можно загружать в S3/Cloudflare R2/GitHub и т.д.
-    Returns: {0: "url1", 1: "url2", ...}
-    """
+    PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://103.181.182.213:8080")
     urls = {}
     for i, path in enumerate(local_paths):
-        urls[i] = f"file://{path}"
+        filename = Path(path).name
+        urls[i] = f"{PUBLIC_BASE_URL}/carousels/{carousel_id}/{filename}"
     return urls
 
 

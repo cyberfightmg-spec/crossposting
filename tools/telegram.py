@@ -125,7 +125,7 @@ async def start_polling(process_update_callback, last_offset: int = None):
                         if CHANNEL_CHAT_ID and str(channel_post.get("chat", {}).get("id")) != CHANNEL_CHAT_ID:
                             continue
                         
-                        asyncio.create_task(process_update_callback({"channel_post": channel_post}))
+                        await process_update_callback({"channel_post": channel_post})
             
         except Exception as e:
             import traceback
