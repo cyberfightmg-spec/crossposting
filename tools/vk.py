@@ -120,6 +120,43 @@ async def post_photo_vk(images: List[Union[str, bytes]], caption: str, carousel:
         return r.json()
 
 
-async def post_carousel_vk(images: List[Union[str, bytes]], caption: str) -> dict:
-    """Пост карусели в VK"""
-    return await post_photo_vk(images, caption, carousel=True)
+async def post_video_vk(video_bytes: bytes, caption: str) -> dict:
+    """Загружает видео в VK и публикует пост со ссылкой на него."""
+    group_id = VK_OWNER_ID.lstrip("-")
+    async with httpx.AsyncClient() as client:
+        # 1. Получаем URL для загрузки
+        r = await client.post(f"{VK_API}/video.save", data={
+            "access_token": VK_TOKEN,
+            "group_id": group_id,
+            "name": caption[:100] if caption else "Video",
+            "description": caption[:5000] if caption else "",
+            "from_group": 1,
+            "v": VK_V
+        }, timeout=15)
+        data = r.json()
+        if "error" in data:
+            return data
+        resp = data["response"]
+        upload_url = resp["upload_url"]
+        video_id   = resp["video_id"]
+        owner_id   = resp["owner_id"]
+
+        # 2. Загружаем файл
+        await client.post(
+            upload_url,
+            files={"video_file": ("video.mp4", video_bytes, "video/mp4")},
+            timeout=300,
+        )
+
+        # 3. Публикуем пост
+        wall_r = await client.post(f"{VK_API}/wall.post", data={
+            "access_token": VK_TOKEN,
+            "owner_id": VK_OWNER_ID,
+            "message": caption,
+            "attachments": f"video{owner_id}_{video_id}",
+            "from_group": 1,
+            "v": VK_V
+        }, timeout=20)
+        return wall_r.json()
+
+

@@ -13,13 +13,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from tools.router import detect_type
 from tools.telegram import send_message, notify_admin, BASE_URL
-from tools.vk import post_text_vk, post_photo_vk
+from tools.vk import post_text_vk, post_photo_vk, post_video_vk
 from tools.dzen import post_dzen
 from tools.pinterest import post_to_pinterest, _refresh_access_token
 from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
 from tools.carousel import process_carousel, cleanup_carousel
-from tools.instagram import post_to_instagram
+from tools.instagram import post_to_instagram, post_reel_instagram
 
 mcp = FastMCP("crosspost-server")
 
@@ -40,12 +40,16 @@ def detect_content_type(post: dict) -> str:
             return "SLIDES"
         elif len(photos) == 1:
             return "PHOTO"
-    if post.get("text"):
+    if post.get("video") or post.get("animation"):
+        return "VIDEO"
+    if post.get("text") and not post.get("photo"):
         return "TEXT"
     if post.get("media_group_id"):
         return "SLIDES"
     if post.get("photo"):
         return "PHOTO"
+    if post.get("text"):
+        return "TEXT"
     return "UNKNOWN"
 
 
@@ -61,6 +65,8 @@ async def send_crosspost_notification(channel_post: dict, result: dict) -> None:
         preview = f"Слайды: {count} фото"
     elif content_type == "PHOTO":
         preview = "Фото"
+    elif content_type == "VIDEO":
+        preview = "Видео (Reels)"
 
     msg = f"📤 Кросспостинг\n\nПолучено из канала:\n{preview}\n\n"
     
@@ -335,6 +341,62 @@ async def _do_crosspost(channel_post: dict) -> dict:
 
         await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
+
+    elif content_type == "VIDEO":
+        video_obj = channel_post.get("video") or channel_post.get("animation", {})
+        caption   = channel_post.get("caption", "")
+        file_id   = video_obj.get("file_id", "")
+        file_size = video_obj.get("file_size", 0)
+        thumb_obj = video_obj.get("thumbnail") or video_obj.get("thumb")
+
+        # Telegram Bot API: файлы >20 МБ не скачиваются через getFile
+        TG_MAX_BYTES = 20 * 1024 * 1024
+        if file_size and file_size > TG_MAX_BYTES:
+            msg = f"⚠️ Видео слишком большое ({file_size // 1024 // 1024} МБ > 20 МБ), пропускаем"
+            print(f"[VIDEO] {msg}")
+            await notify_admin(msg)
+            return result
+
+        from tools.telegram import resolve_file_id
+
+        print(f"[VIDEO] Скачиваем видео file_id={file_id[:20]}... size={file_size}")
+        video_bytes = await resolve_file_id(file_id)
+        print(f"[VIDEO] Загружено {len(video_bytes)} байт")
+
+        thumbnail_bytes = None
+        if thumb_obj:
+            try:
+                thumbnail_bytes = await resolve_file_id(thumb_obj["file_id"])
+            except Exception as e:
+                print(f"[VIDEO] Не удалось скачать превью: {e}")
+
+        async def run_vk_video():
+            if not ENABLED_PLATFORMS["vk"]:
+                result["platforms"]["vk"] = "disabled"
+                return
+            try:
+                vk_result = await post_video_vk(video_bytes, caption)
+                result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
+                if not vk_result.get("response"):
+                    result["errors"].append(f"vk: {vk_result.get('error', 'unknown')}")
+            except Exception as e:
+                result["platforms"]["vk"] = "error"
+                result["errors"].append(f"vk: {str(e)}")
+
+        async def run_instagram_reel():
+            if not ENABLED_PLATFORMS["instagram"]:
+                result["platforms"]["instagram"] = "disabled"
+                return
+            try:
+                ig_result = await post_reel_instagram(video_bytes, caption, thumbnail_bytes)
+                result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
+                if ig_result.get("status") != "ok":
+                    result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
+            except Exception as e:
+                result["platforms"]["instagram"] = "error"
+                result["errors"].append(f"instagram: {str(e)}")
+
+        await asyncio.gather(run_vk_video(), run_instagram_reel())
 
     if result["errors"]:
         result["status"] = "partial" if result["platforms"] else "error"
