@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import base64
+from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -11,6 +12,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.staticfiles import StaticFiles
 from tools.router import detect_type
 from tools.telegram import send_message, notify_admin, BASE_URL
 from tools.vk import post_text_vk, post_photo_vk, post_video_vk
@@ -20,6 +22,13 @@ from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
 from tools.carousel import process_carousel, cleanup_carousel
 from tools.instagram import post_to_instagram, post_reel_instagram
+from tools.instagram_graph import post_photo as ig_post_photo
+from tools.instagram_graph import post_carousel as ig_post_carousel
+from tools.instagram_graph import post_reel as ig_post_reel
+from tools.instagram_graph import is_configured as ig_graph_configured
+from tools.media_host import copy_to_media, save_media, delete_media, MEDIA_DIR
+
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 mcp = FastMCP("crosspost-server")
 
@@ -286,14 +295,24 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
+            media_paths = []
             try:
-                ig_result = await post_to_instagram(carousel["local_paths"], caption)
+                if ig_graph_configured():
+                    # Graph API: копируем файлы в /media/, получаем публичные URL
+                    entries = [copy_to_media(p) for p in carousel["local_paths"]]
+                    media_paths = [p for p, _ in entries]
+                    urls = [u for _, u in entries]
+                    ig_result = await ig_post_carousel(urls, caption)
+                else:
+                    ig_result = await post_to_instagram(carousel["local_paths"], caption)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
                 if ig_result.get("status") != "ok":
                     result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
             except Exception as e:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
+            finally:
+                delete_media(*media_paths)
 
         await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
@@ -330,14 +349,23 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
+            media_paths = []
             try:
-                ig_result = await post_to_instagram(carousel["local_paths"], caption)
+                if ig_graph_configured():
+                    path = carousel["local_paths"][0]
+                    media_path, url = copy_to_media(path)
+                    media_paths = [media_path]
+                    ig_result = await ig_post_photo(url, caption)
+                else:
+                    ig_result = await post_to_instagram(carousel["local_paths"], caption)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
                 if ig_result.get("status") != "ok":
                     result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
             except Exception as e:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
+            finally:
+                delete_media(*media_paths)
 
         await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
@@ -387,14 +415,26 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
+            media_paths = []
             try:
-                ig_result = await post_reel_instagram(video_bytes, caption, thumbnail_bytes)
+                if ig_graph_configured():
+                    video_path, video_url = save_media(video_bytes, "mp4")
+                    media_paths.append(video_path)
+                    cover_url = None
+                    if thumbnail_bytes:
+                        cover_path, cover_url = save_media(thumbnail_bytes, "jpg")
+                        media_paths.append(cover_path)
+                    ig_result = await ig_post_reel(video_url, caption, cover_url)
+                else:
+                    ig_result = await post_reel_instagram(video_bytes, caption, thumbnail_bytes)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
                 if ig_result.get("status") != "ok":
                     result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
             except Exception as e:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
+            finally:
+                delete_media(*media_paths)
 
         await asyncio.gather(run_vk_video(), run_instagram_reel())
 
@@ -540,6 +580,7 @@ mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(
     routes=[
         Mount("/mcp", app=mcp_app),
+        Mount("/media", app=StaticFiles(directory=str(MEDIA_DIR)), name="media"),
         Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
         Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
         Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
