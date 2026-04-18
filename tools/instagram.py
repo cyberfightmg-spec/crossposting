@@ -133,26 +133,55 @@ def resize_for_instagram(image_bytes: bytes, mode: str = "square") -> str:
 
 # ─── Музыка ───────────────────────────────────────────────────────────────────
 
+def _track_artist(track) -> str:
+    """Возвращает имя артиста из MusicTrack (поле называется subtitle, не artist)."""
+    return (
+        getattr(track, "subtitle", None)
+        or getattr(track, "artist", None)
+        or getattr(track, "display_artist", None)
+        or "Unknown"
+    )
+
+
 async def get_top_music(cl: Client, keyword: str = "trending") -> str | None:
-    """Ищет трек в Instagram по ключевому слову, возвращает music_id или None."""
+    """
+    Ищет трек в Instagram по ключевому слову, возвращает music_id или None.
+    Пробует несколько запросов по убыванию специфичности.
+    """
+    if not hasattr(cl, "music_search"):
+        log.warning("Instagram: music_search не поддерживается — обновите instagrapi")
+        return None
+
     loop = asyncio.get_event_loop()
-    for query in [keyword, "popular hits 2025", "top hits"]:
+    queries = [keyword, "popular hits 2025", "top hits", "trending music"]
+    # убираем дубли, сохраняя порядок
+    seen: set = set()
+    unique_queries = [q for q in queries if not (q in seen or seen.add(q))]
+
+    for query in unique_queries:
         try:
             tracks = await loop.run_in_executor(
                 None, lambda q=query: cl.music_search(q, count=10)
             )
             if tracks:
                 track = tracks[0]
-                log.info(f"Instagram: трек — {track.title} by {track.artist}")
-                return str(track.id)
+                artist = _track_artist(track)
+                music_id = str(track.id)
+                log.info(f"Instagram: трек — '{track.title}' by '{artist}' id={music_id}")
+                return music_id
+            log.warning(f"Instagram: music_search({query!r}) вернул пустой список")
         except Exception as e:
-            log.warning(f"Instagram: music_search({query!r}) — {e}")
+            log.warning(f"Instagram: music_search({query!r}) — {type(e).__name__}: {e}")
+
+    log.warning("Instagram: не удалось найти трек, публикуем без музыки")
     return None
 
 
 async def pick_music_for_content(text: str, cl: Client) -> str | None:
     """GPT определяет жанр/настроение → ищет трек в Instagram."""
     import httpx
+    if not text or not text.strip():
+        return await get_top_music(cl)
     try:
         async with httpx.AsyncClient() as http:
             r = await http.post(
@@ -174,10 +203,15 @@ async def pick_music_for_content(text: str, cl: Client) -> str | None:
                 timeout=10,
             )
         keyword = r.json()["choices"][0]["message"]["content"].strip()
-        log.info(f"Instagram: музыкальный запрос — '{keyword}'")
-        return await get_top_music(cl, keyword)
+        log.info(f"Instagram: музыкальный запрос от GPT — '{keyword}'")
+        music_id = await get_top_music(cl, keyword)
+        if music_id:
+            return music_id
+        # GPT-запрос не дал результата — пробуем общий
+        log.warning("Instagram: GPT-запрос не дал трека, пробуем 'trending'")
+        return await get_top_music(cl)
     except Exception as e:
-        log.warning(f"Instagram: ошибка подбора музыки — {e}")
+        log.warning(f"Instagram: ошибка подбора музыки через GPT — {e}")
         return await get_top_music(cl)
 
 
@@ -223,45 +257,30 @@ async def post_photo_instagram(image_bytes: bytes, text: str) -> dict:
 
 async def post_carousel_instagram(images_bytes: list, text: str) -> dict:
     """
-    Публикует карусель в Instagram.
-    Все изображения приводятся к 1080×1080 (square) для единого соотношения сторон.
-    Автоматически подбирает топовый трек по теме поста.
+    Публикует карусель (album) в Instagram.
+    Все слайды приводятся к 1080×1080 (square).
+    Музыка не поддерживается в album_upload через приватный API —
+    для музыки используй post_reel_instagram.
     """
     cl      = await get_ig_client()
     caption = await adapt_instagram(text)
 
-    # Ресайз всех слайдов в square (обязательное условие Instagram)
     paths = [resize_for_instagram(img, mode="square") for img in images_bytes[:10]]
     log.info(f"Instagram: подготовлено {len(paths)} слайдов")
 
-    music_id = await pick_music_for_content(text, cl)
+    result = await _run_with_relogin(
+        lambda: cl.album_upload(paths, caption=caption)
+    )
 
-    if music_id:
-        result = await _run_with_relogin(
-            lambda: cl.album_upload(
-                paths,
-                caption=caption,
-                extra_data={
-                    "audio_muted": False,
-                    "clips_audio_type": "licensed_music",
-                    "music_canonical_id": music_id,
-                },
-            )
-        )
-    else:
-        result = await _run_with_relogin(
-            lambda: cl.album_upload(paths, caption=caption)
-        )
-
-    log.info(f"Instagram карусель ✅ id={result.pk} | музыка: {music_id or 'нет'}")
-    return {"status": "ok", "media_id": str(result.pk), "music_id": music_id}
+    log.info(f"Instagram карусель ✅ id={result.pk}")
+    return {"status": "ok", "media_id": str(result.pk)}
 
 
 async def post_reel_instagram(
     video_bytes: bytes, text: str, thumbnail_bytes: bytes | None = None
 ) -> dict:
-    cl      = await get_ig_client()
-    caption = await adapt_instagram(text)
+    cl       = await get_ig_client()
+    caption  = await adapt_instagram(text)
     music_id = await pick_music_for_content(text, cl)
 
     video_path = f"/tmp/ig_reel_{abs(hash(video_bytes))}.mp4"
@@ -272,16 +291,24 @@ async def post_reel_instagram(
     if thumbnail_bytes:
         thumb_path = resize_for_instagram(thumbnail_bytes, mode="portrait")
 
-    extra = {}
+    # extra_data для clip_upload: музыка прикрепляется через clips_audio_type
+    extra_data = None
     if music_id:
-        extra = {"audio_muted": False, "music_canonical_id": music_id}
+        extra_data = {
+            "audio_muted": False,
+            "clips_audio_type": "licensed_music",
+            "music_canonical_id": music_id,
+        }
+        log.info(f"Instagram Reels: прикрепляем music_id={music_id}")
+    else:
+        log.warning("Instagram Reels: музыка не найдена, публикуем без трека")
 
     result = await _run_with_relogin(
         lambda: cl.clip_upload(
             video_path,
             caption=caption,
             thumbnail=thumb_path,
-            extra_data=extra or None,
+            extra_data=extra_data,
         )
     )
 
