@@ -13,6 +13,7 @@ from starlette.routing import Mount, Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.staticfiles import StaticFiles
+from starlette.templating import Jinja2Templates
 from tools.router import detect_type
 from tools.telegram import send_message, notify_admin, BASE_URL
 from tools.vk import post_text_vk, post_photo_vk, post_video_vk
@@ -27,8 +28,17 @@ from tools.instagram_graph import post_carousel as ig_post_carousel
 from tools.instagram_graph import post_reel as ig_post_reel
 from tools.instagram_graph import is_configured as ig_graph_configured
 from tools.media_host import copy_to_media, save_media, delete_media, MEDIA_DIR
+from tools.instagram_media import (
+    create_dated_folder,
+    save_photos_batch,
+    save_video_with_cover,
+    cleanup_dated_folder,
+)
 
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 mcp = FastMCP("crosspost-server")
 
@@ -77,20 +87,40 @@ async def send_crosspost_notification(channel_post: dict, result: dict) -> None:
     elif content_type == "VIDEO":
         preview = "Видео (Reels)"
 
-    msg = f"📤 Кросспостинг\n\nПолучено из канала:\n{preview}\n\n"
+    chat = channel_post.get("chat", {})
+    channel_title = chat.get("title", "Неизвестный канал")
+    channel_username = chat.get("username", "")
     
-    success = []
-    failed = []
-    for platform, status in result.get("platforms", {}).items():
+    if channel_username:
+        channel_name = f"@{channel_username}"
+    else:
+        channel_name = channel_title
+
+    from datetime import datetime
+    
+    publish_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+    
+    msg = f"📤 Кросспостинг\n\nКанал: {channel_name}\n{preview}\n\n"
+    
+    platforms = result.get("platforms", {})
+    platform_names = {
+        "vk": "VK",
+        "instagram": "Instagram", 
+        "pinterest": "Pinterest",
+        "dzen": "Дзен",
+        "youtube": "YouTube",
+    }
+    
+    for platform, status in platforms.items():
+        name = platform_names.get(platform, platform.capitalize())
         if status == "ok":
-            success.append(platform)
+            msg += f"✅ {name:<12} ({publish_time})\n"
+        elif status == "disabled":
+            msg += f"⏸ {name:<12} (отключено)\n"
         elif status == "error":
-            failed.append(platform)
-    
-    if success:
-        msg += f"✅ Отправлено: {', '.join(success)}\n"
-    if failed:
-        msg += f"❌ Ошибка: {', '.join(failed)}\n"
+            msg += f"❌ {name:<12} (ошибка)\n"
+        elif status == "logged":
+            msg += f"📝 {name:<12} (залогировано)\n"
     
     if result.get("errors"):
         msg += f"\nОшибки: {result['errors']}"
@@ -295,14 +325,15 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
-            media_paths = []
+            folder_name = None
             try:
                 if ig_graph_configured():
-                    # Graph API: копируем файлы в /media/, получаем публичные URL
-                    entries = [copy_to_media(p) for p in carousel["local_paths"]]
-                    media_paths = [p for p, _ in entries]
-                    urls = [u for _, u in entries]
-                    ig_result = await ig_post_carousel(urls, caption)
+                    # Graph API: сохраняем фото в датированную папку и получаем публичные URL
+                    folder_name = create_dated_folder()
+                    # Читаем байты из локальных файлов карусели
+                    photo_bytes_list = [open(p, "rb").read() for p in carousel["local_paths"]]
+                    _, public_urls = save_photos_batch(photo_bytes_list, folder_name)
+                    ig_result = await ig_post_carousel(public_urls, caption)
                 else:
                     ig_result = await post_to_instagram(carousel["local_paths"], caption)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
@@ -312,7 +343,9 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
             finally:
-                delete_media(*media_paths)
+                if folder_name:
+                    # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
+                    asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
         await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
@@ -349,13 +382,14 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
-            media_paths = []
+            folder_name = None
             try:
                 if ig_graph_configured():
-                    path = carousel["local_paths"][0]
-                    media_path, url = copy_to_media(path)
-                    media_paths = [media_path]
-                    ig_result = await ig_post_photo(url, caption)
+                    # Graph API: сохраняем фото в датированную папку
+                    folder_name = create_dated_folder()
+                    photo_bytes = open(carousel["local_paths"][0], "rb").read()
+                    _, public_url = save_photos_batch([photo_bytes], folder_name)
+                    ig_result = await ig_post_photo(public_url[0], caption)
                 else:
                     ig_result = await post_to_instagram(carousel["local_paths"], caption)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
@@ -365,7 +399,9 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
             finally:
-                delete_media(*media_paths)
+                if folder_name:
+                    # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
+                    asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
         await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
         await cleanup_carousel(carousel["carousel_id"])
@@ -415,15 +451,14 @@ async def _do_crosspost(channel_post: dict) -> dict:
             if not ENABLED_PLATFORMS["instagram"]:
                 result["platforms"]["instagram"] = "disabled"
                 return
-            media_paths = []
+            folder_name = None
             try:
                 if ig_graph_configured():
-                    video_path, video_url = save_media(video_bytes, "mp4")
-                    media_paths.append(video_path)
-                    cover_url = None
-                    if thumbnail_bytes:
-                        cover_path, cover_url = save_media(thumbnail_bytes, "jpg")
-                        media_paths.append(cover_path)
+                    # Graph API: сохраняем видео и обложку в датированную папку
+                    folder_name = create_dated_folder()
+                    _, video_url, _, cover_url = save_video_with_cover(
+                        video_bytes, thumbnail_bytes, folder_name
+                    )
                     ig_result = await ig_post_reel(video_url, caption, cover_url)
                 else:
                     ig_result = await post_reel_instagram(video_bytes, caption, thumbnail_bytes)
@@ -434,7 +469,9 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["instagram"] = "error"
                 result["errors"].append(f"instagram: {str(e)}")
             finally:
-                delete_media(*media_paths)
+                if folder_name:
+                    # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
+                    asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
         await asyncio.gather(run_vk_video(), run_instagram_reel())
 
@@ -468,6 +505,11 @@ PINTEREST_APP_SECRET = os.getenv("PINTEREST_APP_SECRET")
 PINTEREST_REDIRECT_URI = os.getenv("PINTEREST_REDIRECT_URI", "")
 PINTEREST_TOKEN_FILE = "/root/pinterest_token.json"
 PINTEREST_SCOPES = "boards:read,boards:write,pins:read,pins:write,user_accounts:read"
+
+
+async def homepage(request: Request):
+    """Главная страница."""
+    return templates.TemplateResponse(request, "index.html", {})
 
 
 async def pinterest_auth(request: Request):
@@ -579,6 +621,7 @@ async def lifespan(app):
 mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(
     routes=[
+        Route("/", endpoint=homepage, methods=["GET"]),
         Mount("/mcp", app=mcp_app),
         Mount("/media", app=StaticFiles(directory=str(MEDIA_DIR)), name="media"),
         Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
