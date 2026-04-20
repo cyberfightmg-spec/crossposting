@@ -623,6 +623,9 @@ async def lifespan(app):
         yield
 
 
+SITE_MEDIA_DIR = Path(__file__).parent / "site_media"
+SITE_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
 mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(
     routes=[
@@ -630,6 +633,7 @@ app = Starlette(
         Route("/privacy", endpoint=privacy_policy, methods=["GET"]),
         Mount("/mcp", app=mcp_app),
         Mount("/media", app=StaticFiles(directory=str(MEDIA_DIR)), name="media"),
+        Mount("/site_media", app=StaticFiles(directory=str(SITE_MEDIA_DIR)), name="site_media"),
         Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
         Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
         Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
