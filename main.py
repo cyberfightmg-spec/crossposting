@@ -512,6 +512,11 @@ async def homepage(request: Request):
     return templates.TemplateResponse(request, "index.html", {})
 
 
+async def privacy_policy(request: Request):
+    """Политика конфиденциальности для РФ."""
+    return templates.TemplateResponse(request, "privacy.html", {})
+
+
 async def pinterest_auth(request: Request):
     """Редирект на страницу авторизации Pinterest."""
     if not PINTEREST_APP_ID or not PINTEREST_REDIRECT_URI:
@@ -622,6 +627,7 @@ mcp_app = mcp.http_app(path="/mcp")
 app = Starlette(
     routes=[
         Route("/", endpoint=homepage, methods=["GET"]),
+        Route("/privacy", endpoint=privacy_policy, methods=["GET"]),
         Mount("/mcp", app=mcp_app),
         Mount("/media", app=StaticFiles(directory=str(MEDIA_DIR)), name="media"),
         Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
