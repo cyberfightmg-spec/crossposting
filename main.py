@@ -254,11 +254,39 @@ async def auth_verify(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+_telethon_task: asyncio.Task | None = None
+
+
+async def _run_telethon_safe() -> None:
+    """Запускает Telethon-слушатель; не роняет весь процесс при ошибке."""
+    try:
+        authorized = await is_authorized()
+        if not authorized:
+            print("[TELETHON] Не авторизован — перейди на / и залогинься через веб")
+            return
+        await start_listening(on_parsed_post)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        print(f"[TELETHON ERROR] {e}")
+
+
 @asynccontextmanager
 async def lifespan(app):
+    global _telethon_task
     if WEBHOOK_URL:
         await _register_webhook()
-    yield
+    # Telethon стартует фоном — не блокирует uvicorn
+    _telethon_task = asyncio.create_task(_run_telethon_safe())
+    try:
+        yield
+    finally:
+        if _telethon_task:
+            _telethon_task.cancel()
+            try:
+                await _telethon_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = Starlette(
@@ -285,8 +313,9 @@ async def run_all() -> None:
 
 if __name__ == "__main__":
     mode = os.getenv("MODE", "polling")
+    port = int(os.getenv("PORT", "8080"))
     if mode == "polling":
         asyncio.run(run_all())
     else:
         import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
