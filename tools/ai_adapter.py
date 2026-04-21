@@ -126,6 +126,51 @@ async def adapt_youtube(text: str) -> str:
         return r.json()["choices"][0]["message"]["content"]
 
 
+async def split_into_slides(text: str, max_slides: int = 7) -> list[dict]:
+    """Split a long Telegram post into carousel slides via OpenAI.
+
+    Returns a list of {"title": str, "body": str} dicts.
+    """
+    system = (
+        "Ты получаешь пост из Telegram. "
+        "Разбей его на карточки для Instagram-карусели.\n"
+        "Правила:\n"
+        f"- От 3 до {max_slides} карточек\n"
+        "- Каждая карточка: title (до 6 слов), body (1-3 предложения)\n"
+        "- Ответ ТОЛЬКО в формате JSON-массива:\n"
+        '[{"title": "...", "body": "..."}, ...]\n'
+        "- Без дополнительного текста, только JSON"
+    )
+    import json as _json
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": "gpt-4.1-mini",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": 0.7,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=30,
+        )
+    raw = r.json()["choices"][0]["message"]["content"]
+    try:
+        parsed = _json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        # Sometimes GPT wraps in {"slides": [...]}
+        for v in parsed.values():
+            if isinstance(v, list):
+                return v
+    except Exception:
+        pass
+    return [{"title": "Пост", "body": text[:300]}]
+
+
 async def get_wordstat_query(text: str) -> str:
     """GPT generates a broad search query 1-3 words for Wordstat."""
     async with httpx.AsyncClient() as client:

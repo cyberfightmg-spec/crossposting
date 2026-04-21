@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Парсинг ТГ</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f23;
+      color: #e0e0f0;
+      min-height: 100vh;
+      padding: 32px 16px;
+    }
+
+    .container { max-width: 760px; margin: 0 auto; }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #888;
+      font-size: 0.9rem;
+      margin-bottom: 32px;
+    }
+
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 40px;
+      font-size: 0.85rem;
+    }
+
+    .step {
+      background: #1e1e3f;
+      border: 1px solid #2e2e5e;
+      border-radius: 8px;
+      padding: 8px 14px;
+      color: #a78bfa;
+      font-weight: 600;
+    }
+
+    .arrow { color: #444; font-size: 1.2rem; }
+
+    .card {
+      background: #1a1a35;
+      border: 1px solid #2a2a50;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+    }
+
+    .card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: #c4b5fd;
+    }
+
+    .status-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .badge {
+      font-size: 0.8rem;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+
+    .badge.ok   { background: #14532d; color: #86efac; }
+    .badge.warn { background: #431407; color: #fdba74; }
+    .badge.err  { background: #450a0a; color: #fca5a5; }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"], input[type="tel"] {
+      width: 100%;
+      background: #0f0f23;
+      border: 1px solid #2a2a50;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #e0e0f0;
+      font-size: 0.95rem;
+      margin-bottom: 12px;
+      outline: none;
+      transition: border-color .2s;
+    }
+
+    input:focus { border-color: #6366f1; }
+
+    button {
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+
+    button:hover { opacity: .85; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+
+    .btn-secondary {
+      background: #1e1e3f;
+      border: 1px solid #3b3b6e;
+      color: #a78bfa;
+    }
+
+    .channels-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .channel-tag {
+      background: #1e1e3f;
+      border: 1px solid #3b3b6e;
+      border-radius: 20px;
+      padding: 4px 12px;
+      font-size: 0.85rem;
+      color: #a78bfa;
+    }
+
+    .log {
+      background: #0a0a1a;
+      border: 1px solid #1e1e3e;
+      border-radius: 8px;
+      padding: 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.8rem;
+      color: #7dd3fc;
+      max-height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    #code-section { display: none; }
+    .msg { margin-top: 10px; font-size: 0.85rem; color: #86efac; }
+    .msg.err { color: #fca5a5; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Парсинг ТГ</h1>
+  <p class="subtitle">Telegram → OpenAI → Pillow → Instagram карусель</p>
+
+  <div class="pipeline">
+    <div class="step">Telethon</div>
+    <span class="arrow">→</span>
+    <div class="step">OpenAI</div>
+    <span class="arrow">→</span>
+    <div class="step">Pillow 1080×1080</div>
+    <span class="arrow">→</span>
+    <div class="step">instagrapi album_upload</div>
+  </div>
+
+  <!-- Status -->
+  <div class="card">
+    <h2>Статус</h2>
+    <div class="status-row" id="status-row">
+      <span class="badge warn">Загрузка...</span>
+    </div>
+  </div>
+
+  <!-- Auth -->
+  {% if not authorized %}
+  <div class="card">
+    <h2>Авторизация Telegram (Telethon)</h2>
+    <p style="font-size:.85rem;color:#888;margin-bottom:16px">
+      Нужен номер телефона аккаунта Telegram, от имени которого будет идти парсинг.
+      Получи API_ID и API_HASH на <strong>my.telegram.org</strong> и пропиши в .env.
+    </p>
+    <div id="phone-section">
+      <label>Номер телефона (с кодом страны)</label>
+      <input type="tel" id="phone-input" placeholder="+79001234567">
+      <button onclick="sendCode()">Отправить код</button>
+    </div>
+    <div id="code-section">
+      <label>Код из Telegram</label>
+      <input type="text" id="code-input" placeholder="12345" maxlength="6">
+      <button onclick="verifyCode()">Подтвердить</button>
+    </div>
+    <div id="auth-msg" class="msg"></div>
+  </div>
+  {% else %}
+  <div class="card">
+    <h2>Telegram авторизован ✅</h2>
+    <p style="font-size:.85rem;color:#888;">Сессия активна. Парсинг будет работать.</p>
+  </div>
+  {% endif %}
+
+  <!-- Channels -->
+  <div class="card">
+    <h2>Каналы для парсинга</h2>
+    {% if channels %}
+    <div class="channels-list">
+      {% for ch in channels %}<span class="channel-tag">{{ ch }}</span>{% endfor %}
+    </div>
+    {% else %}
+    <p style="font-size:.85rem;color:#888;margin-bottom:12px">
+      Нет каналов. Добавь PARSE_CHANNELS=@channel1,@channel2 в .env
+    </p>
+    {% endif %}
+  </div>
+
+  <!-- Manual parse -->
+  <div class="card">
+    <h2>Ручной парсинг истории</h2>
+    <label>Канал (@username)</label>
+    <input type="text" id="hist-channel" placeholder="@channel_username">
+    <label>Лимит постов</label>
+    <input type="text" id="hist-limit" value="5" style="width:80px">
+    <br>
+    <button onclick="runHistory()" id="hist-btn">Запустить</button>
+    <div class="log" id="hist-log" style="margin-top:14px;display:none"></div>
+  </div>
+
+</div>
+
+<script>
+  let phoneCodeHash = "";
+
+  async function loadStatus() {
+    const r = await fetch("/api/status");
+    const d = await r.json();
+    const row = document.getElementById("status-row");
+    row.innerHTML = "";
+    const items = [
+      ["Telegram авт.", d.authorized],
+      ["TG_API_ID",     d.api_id_set],
+      ["Instagram",     d.ig_set],
+      ["OpenAI",        d.openai_set],
+    ];
+    items.forEach(([label, ok]) => {
+      const b = document.createElement("span");
+      b.className = "badge " + (ok ? "ok" : "err");
+      b.textContent = (ok ? "✓ " : "✗ ") + label;
+      row.appendChild(b);
+    });
+  }
+
+  async function sendCode() {
+    const phone = document.getElementById("phone-input").value.trim();
+    const msg = document.getElementById("auth-msg");
+    if (!phone) { msg.textContent = "Введи номер"; msg.className="msg err"; return; }
+    msg.textContent = "Отправляю..."; msg.className="msg";
+    const r = await fetch("/auth/send-code", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({phone})
+    });
+    const d = await r.json();
+    if (d.status === "ok") {
+      phoneCodeHash = d.phone_code_hash;
+      document.getElementById("phone-section").style.display = "none";
+      document.getElementById("code-section").style.display = "block";
+      msg.textContent = "Код отправлен в Telegram"; msg.className="msg";
+    } else {
+      msg.textContent = "Ошибка: " + d.reason; msg.className="msg err";
+    }
+  }
+
+  async function verifyCode() {
+    const phone = document.getElementById("phone-input").value.trim();
+    const code  = document.getElementById("code-input").value.trim();
+    const msg   = document.getElementById("auth-msg");
+    msg.textContent = "Проверяю..."; msg.className="msg";
+    const r = await fetch("/auth/verify", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({phone, code, phone_code_hash: phoneCodeHash})
+    });
+    const d = await r.json();
+    if (d.status === "ok") {
+      msg.textContent = "Авторизация успешна! Обновляю страницу..."; msg.className="msg";
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      msg.textContent = "Ошибка: " + d.reason; msg.className="msg err";
+    }
+  }
+
+  async function runHistory() {
+    const channel = document.getElementById("hist-channel").value.trim();
+    const limit   = document.getElementById("hist-limit").value.trim() || "5";
+    const log     = document.getElementById("hist-log");
+    const btn     = document.getElementById("hist-btn");
+    if (!channel) { alert("Введи канал"); return; }
+    btn.disabled = true;
+    log.style.display = "block";
+    log.textContent = "Запускаю парсинг...\n";
+    const r = await fetch(`/api/parse?channel=${encodeURIComponent(channel)}&limit=${limit}`);
+    const d = await r.json();
+    btn.disabled = false;
+    if (d.status === "ok") {
+      log.textContent = JSON.stringify(d.results, null, 2);
+    } else {
+      log.textContent = "Ошибка: " + d.reason;
+    }
+  }
+
+  loadStatus();
+</script>
+</body>
+</html>
