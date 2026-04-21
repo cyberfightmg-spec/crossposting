@@ -16,107 +16,94 @@
     .container { max-width: 680px; margin: 0 auto; }
 
     h1 {
-      font-size: 2rem;
-      font-weight: 700;
+      font-size: 2rem; font-weight: 700;
       background: linear-gradient(135deg, #6366f1, #a78bfa);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
       margin-bottom: 6px;
     }
-    .subtitle { color: #666; font-size: .9rem; margin-bottom: 36px; }
+    .subtitle { color: #555; font-size: .9rem; margin-bottom: 36px; }
 
-    /* Pipeline diagram */
     .pipeline {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-bottom: 40px;
-      font-size: .82rem;
+      display: flex; align-items: center; gap: 6px;
+      flex-wrap: wrap; margin-bottom: 40px; font-size: .8rem;
     }
     .step {
-      background: #1e1e3f;
-      border: 1px solid #2e2e5e;
-      border-radius: 8px;
-      padding: 7px 13px;
-      color: #a78bfa;
-      font-weight: 600;
+      background: #1e1e3f; border: 1px solid #2e2e5e;
+      border-radius: 8px; padding: 7px 13px; color: #a78bfa; font-weight: 600;
     }
-    .step small { display: block; color: #555; font-weight: 400; font-size: .72rem; margin-top: 2px; }
+    .step small { display: block; color: #555; font-weight: 400; font-size: .7rem; margin-top: 2px; }
     .arrow { color: #333; font-size: 1.1rem; }
 
-    /* Cards */
     .card {
-      background: #1a1a35;
-      border: 1px solid #2a2a50;
-      border-radius: 14px;
-      padding: 24px;
-      margin-bottom: 20px;
+      background: #1a1a35; border: 1px solid #2a2a50;
+      border-radius: 14px; padding: 24px; margin-bottom: 20px;
     }
     .card h2 { font-size: 1rem; font-weight: 600; color: #c4b5fd; margin-bottom: 16px; }
 
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
     .badge {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      border-radius: 10px;
-      font-size: .82rem;
-      font-weight: 500;
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; border-radius: 10px;
+      font-size: .82rem; font-weight: 500;
     }
-    .badge.ok   { background: #14532d33; border: 1px solid #166534; color: #86efac; }
-    .badge.err  { background: #450a0a33; border: 1px solid #7f1d1d; color: #fca5a5; }
+    .badge.ok  { background: #14532d33; border: 1px solid #166534; color: #86efac; }
+    .badge.err { background: #450a0a33; border: 1px solid #7f1d1d; color: #fca5a5; }
+    .badge.warn{ background: #78350f33; border: 1px solid #92400e; color: #fcd34d; }
     .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .dot.ok  { background: #22c55e; }
-    .dot.err { background: #ef4444; }
+    .dot.ok   { background: #22c55e; }
+    .dot.err  { background: #ef4444; }
+    .dot.warn { background: #f59e0b; }
 
     .info-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 0;
-      border-bottom: 1px solid #1e1e3e;
-      font-size: .88rem;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 0; border-bottom: 1px solid #1e1e3e; font-size: .88rem;
     }
     .info-row:last-child { border-bottom: none; }
-    .info-row .label { color: #666; }
-    .info-row .value { color: #c4b5fd; font-weight: 500; }
+    .info-row .label { color: #555; }
+    .info-row .value { color: #c4b5fd; font-weight: 500; font-size: .85rem; }
 
     .flow-step {
-      display: flex;
-      gap: 14px;
-      padding: 12px 0;
-      border-bottom: 1px solid #1e1e3e;
-      align-items: flex-start;
-      font-size: .88rem;
+      display: flex; gap: 14px; padding: 12px 0;
+      border-bottom: 1px solid #1e1e3e; align-items: flex-start; font-size: .88rem;
     }
     .flow-step:last-child { border-bottom: none; }
     .flow-num {
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
+      width: 28px; height: 28px; border-radius: 50%;
       background: linear-gradient(135deg, #6366f1, #7c3aed);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: .75rem;
-      font-weight: 700;
-      flex-shrink: 0;
-      margin-top: 1px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; font-weight: 700; flex-shrink: 0; margin-top: 1px;
     }
     .flow-title { font-weight: 600; color: #e0e0f0; margin-bottom: 2px; }
     .flow-desc  { color: #666; font-size: .82rem; }
 
+    label { display: block; font-size: .82rem; color: #666; margin-bottom: 5px; }
+    input[type="text"], input[type="tel"] {
+      width: 100%; background: #0f0f23; border: 1px solid #2a2a50;
+      border-radius: 8px; padding: 10px 14px; color: #e0e0f0;
+      font-size: .9rem; margin-bottom: 12px; outline: none; transition: border-color .2s;
+    }
+    input:focus { border-color: #6366f1; }
+    button {
+      background: linear-gradient(135deg, #6366f1, #7c3aed); color: #fff;
+      border: none; border-radius: 8px; padding: 10px 22px;
+      font-size: .9rem; font-weight: 600; cursor: pointer; transition: opacity .2s;
+    }
+    button:hover { opacity: .85; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+
     pre {
-      background: #0a0a1a;
-      border: 1px solid #1e1e3e;
-      border-radius: 8px;
-      padding: 14px;
-      font-size: .8rem;
-      color: #7dd3fc;
-      overflow-x: auto;
-      line-height: 1.6;
+      background: #0a0a1a; border: 1px solid #1e1e3e; border-radius: 8px;
+      padding: 14px; font-size: .78rem; color: #7dd3fc; overflow-x: auto; line-height: 1.7;
+    }
+
+    .msg { margin-top: 10px; font-size: .85rem; }
+    .msg.ok  { color: #86efac; }
+    .msg.err { color: #fca5a5; }
+
+    #code-section { display: none; }
+    .tag {
+      display: inline-block; background: #1e1e3f; border: 1px solid #3b3b6e;
+      border-radius: 20px; padding: 3px 10px; font-size: .8rem; color: #a78bfa; margin: 2px;
     }
   </style>
 </head>
@@ -124,10 +111,10 @@
 <div class="container">
 
   <h1>Парсинг ТГ</h1>
-  <p class="subtitle">Тема в канале → одобрение → Gemini генерирует карусель → публикация в канал</p>
+  <p class="subtitle">Telethon читает чужой канал → ты одобряешь → Gemini генерирует карусель → публикуется в твой канал</p>
 
   <div class="pipeline">
-    <div class="step">Тема в канале<small>пишешь текст</small></div>
+    <div class="step">Telethon<small>читает чужой канал</small></div>
     <span class="arrow">→</span>
     <div class="step">Одобрение<small>кнопка в личке</small></div>
     <span class="arrow">→</span>
@@ -135,98 +122,168 @@
     <span class="arrow">→</span>
     <div class="step">Gemini Image Gen<small>картинки</small></div>
     <span class="arrow">→</span>
-    <div class="step">Публикация<small>карусель в канал</small></div>
+    <div class="step">Твой канал<small>карусель опубликована</small></div>
   </div>
 
   <!-- Status -->
   <div class="card">
-    <h2>Статус сервиса</h2>
+    <h2>Статус</h2>
     <div class="grid" id="status-grid">
-      <div class="badge err"><div class="dot err"></div>Загрузка…</div>
+      <div class="badge warn"><div class="dot warn"></div>Загрузка…</div>
     </div>
-    <div style="margin-top: 16px;" id="info-rows"></div>
+    <div id="info-rows"></div>
+  </div>
+
+  <!-- Telethon auth -->
+  <div class="card" id="auth-card">
+    <h2>Авторизация Telethon</h2>
+    <p style="font-size:.82rem;color:#555;margin-bottom:14px">
+      Telethon работает как твой аккаунт — только так можно читать чужие каналы.
+      API_ID и API_HASH получи на <strong style="color:#a78bfa">my.telegram.org</strong>.
+    </p>
+    <div id="phone-section">
+      <label>Номер телефона</label>
+      <input type="tel" id="phone-input" placeholder="+79001234567">
+      <button onclick="sendCode()">Отправить код</button>
+    </div>
+    <div id="code-section">
+      <label>Код из Telegram</label>
+      <input type="text" id="code-input" placeholder="12345" maxlength="6">
+      <button onclick="verifyCode()">Подтвердить</button>
+    </div>
+    <div id="auth-msg" class="msg"></div>
   </div>
 
   <!-- Flow -->
   <div class="card">
-    <h2>Как пользоваться</h2>
+    <h2>Как работает</h2>
     <div class="flow-step">
       <div class="flow-num">1</div>
       <div>
-        <div class="flow-title">Напиши тему в канале</div>
-        <div class="flow-desc">Просто опубликуй текст с темой или кратким описанием идеи для карусели.</div>
+        <div class="flow-title">Telethon читает SOURCE_CHANNELS</div>
+        <div class="flow-desc">Новый пост в чужом канале → автоматически попадает на модерацию.</div>
       </div>
     </div>
     <div class="flow-step">
       <div class="flow-num">2</div>
       <div>
-        <div class="flow-title">Одобри в личке у бота</div>
-        <div class="flow-desc">Бот пришлёт сообщение с кнопками «✅ Создать карусель» и «❌ Отклонить».</div>
+        <div class="flow-title">Тебе приходит сообщение с кнопками</div>
+        <div class="flow-desc">«✅ Создать карусель» или «❌ Пропустить» — решаешь ты.</div>
       </div>
     </div>
     <div class="flow-step">
       <div class="flow-num">3</div>
       <div>
         <div class="flow-title">Gemini генерирует карусель</div>
-        <div class="flow-desc">Gemini 2.5 Flash разбивает тему на {{ slide_count }} слайдов → Gemini Image Gen рисует картинки.</div>
+        <div class="flow-desc">
+          Gemini 2.5 Flash разбивает текст на слайды →
+          Gemini Image Gen рисует картинку на каждый слайд →
+          Pillow накладывает текст.
+        </div>
       </div>
     </div>
     <div class="flow-step">
       <div class="flow-num">4</div>
       <div>
-        <div class="flow-title">Готово — карусель в канале</div>
-        <div class="flow-desc">Альбом из {{ slide_count }} слайдов автоматически публикуется в канале.</div>
+        <div class="flow-title">Карусель публикуется в твой канал</div>
+        <div class="flow-desc">Бот отправляет альбом фотографий в TELEGRAM_CHANNEL_CHAT_ID.</div>
       </div>
     </div>
   </div>
 
   <!-- Config -->
   <div class="card">
-    <h2>Настройка .env</h2>
-    <pre>TELEGRAM_BOT_TOKEN=...        # токен бота
-TELEGRAM_CHANNEL_CHAT_ID=... # ID канала (-100...)
-NOTIFY_CHAT_ID=...           # твой личный chat_id
-GEMINI_API_KEY=...           # ключ от Google AI Studio
-SLIDE_COUNT=5                # количество слайдов
-MODE=polling                 # polling | webhook
-WEBHOOK_URL=https://...      # если webhook</pre>
+    <h2>.env</h2>
+    <pre>TELEGRAM_BOT_TOKEN=...          # бот (должен быть админом в твоём канале)
+TELEGRAM_CHANNEL_CHAT_ID=...    # ID твоего канала (куда публиковать)
+NOTIFY_CHAT_ID=...              # твой личный chat_id (сюда кнопки)
+
+TG_API_ID=...                   # с my.telegram.org
+TG_API_HASH=...                 # с my.telegram.org
+SOURCE_CHANNELS=@ch1,@ch2       # чужие каналы (откуда парсим)
+
+GEMINI_API_KEY=...
+SLIDE_COUNT=5
+MIN_TEXT_LEN=80</pre>
   </div>
 
 </div>
 
 <script>
-async function loadStatus() {
-  const r = await fetch("/api/status");
-  const d = await r.json();
-  const grid = document.getElementById("status-grid");
-  const infoRows = document.getElementById("info-rows");
+  let phoneCodeHash = "";
 
-  const checks = [
-    ["Gemini API",    d.gemini_key],
-    ["Bot Token",     d.bot_token],
-    ["Канал задан",   !!d.channel],
-    ["Notify Chat",   !!d.notify_chat],
-  ];
-  grid.innerHTML = checks.map(([label, ok]) => `
-    <div class="badge ${ok ? 'ok' : 'err'}">
-      <div class="dot ${ok ? 'ok' : 'err'}"></div>
-      ${ok ? '✓' : '✗'} ${label}
-    </div>`).join("");
+  async function loadStatus() {
+    try {
+      const r = await fetch("/api/status");
+      const d = await r.json();
+      const grid = document.getElementById("status-grid");
+      const infoRows = document.getElementById("info-rows");
+      const authCard = document.getElementById("auth-card");
 
-  const info = [
-    ["Канал",         d.channel   || "не задан"],
-    ["Notify Chat",   d.notify_chat || "не задан"],
-    ["Слайдов",       d.slide_count],
-    ["Ожидают одобр.", d.pending],
-  ];
-  infoRows.innerHTML = info.map(([label, value]) => `
-    <div class="info-row">
-      <span class="label">${label}</span>
-      <span class="value">${value}</span>
-    </div>`).join("");
-}
-loadStatus();
-setInterval(loadStatus, 15000);
+      if (d.tg_auth) authCard.style.display = "none";
+
+      const checks = [
+        ["Gemini API",      d.gemini_key,  "gemini_key"],
+        ["Bot Token",       d.bot_token,   "bot_token"],
+        ["Telethon авт.",   d.tg_auth,     "tg_auth"],
+        ["Канал задан",     !!d.channel,   "channel"],
+      ];
+      grid.innerHTML = checks.map(([label, ok]) => `
+        <div class="badge ${ok ? 'ok' : 'err'}">
+          <div class="dot ${ok ? 'ok' : 'err'}"></div>
+          ${ok ? '✓' : '✗'} ${label}
+        </div>`).join("");
+
+      const sources = (d.source_channels || []).map(c => `<span class="tag">${c}</span>`).join("") || '<span style="color:#555">не заданы</span>';
+      infoRows.innerHTML = `
+        <div class="info-row"><span class="label">Источники (SOURCE_CHANNELS)</span><span class="value">${sources}</span></div>
+        <div class="info-row"><span class="label">Публикую в канал</span><span class="value">${d.channel || '—'}</span></div>
+        <div class="info-row"><span class="label">Слайдов</span><span class="value">${d.slide_count}</span></div>
+        <div class="info-row"><span class="label">Ожидают одобрения</span><span class="value">${d.pending}</span></div>
+      `;
+    } catch(e) { /* ignore */ }
+  }
+
+  async function sendCode() {
+    const phone = document.getElementById("phone-input").value.trim();
+    const msg = document.getElementById("auth-msg");
+    if (!phone) { msg.textContent = "Введи номер"; msg.className="msg err"; return; }
+    msg.textContent = "Отправляю…"; msg.className="msg";
+    const r = await fetch("/auth/send-code", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({phone})
+    });
+    const d = await r.json();
+    if (d.status === "ok") {
+      phoneCodeHash = d.phone_code_hash;
+      document.getElementById("phone-section").style.display = "none";
+      document.getElementById("code-section").style.display = "block";
+      msg.textContent = "Код отправлен в Telegram"; msg.className="msg ok";
+    } else {
+      msg.textContent = "Ошибка: " + d.reason; msg.className="msg err";
+    }
+  }
+
+  async function verifyCode() {
+    const phone = document.getElementById("phone-input").value.trim();
+    const code  = document.getElementById("code-input").value.trim();
+    const msg   = document.getElementById("auth-msg");
+    msg.textContent = "Проверяю…"; msg.className="msg";
+    const r = await fetch("/auth/verify", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({phone, code, phone_code_hash: phoneCodeHash})
+    });
+    const d = await r.json();
+    if (d.status === "ok") {
+      msg.textContent = "Авторизация успешна! ✅"; msg.className="msg ok";
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      msg.textContent = "Ошибка: " + d.reason; msg.className="msg err";
+    }
+  }
+
+  loadStatus();
+  setInterval(loadStatus, 10000);
 </script>
 </body>
 </html>
