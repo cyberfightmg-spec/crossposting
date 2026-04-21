@@ -3,3 +3,4 @@
 pinterest_creds/
 *.log
 last_offset.json
+__pycache__/
