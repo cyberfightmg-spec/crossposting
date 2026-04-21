@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Парсинг ТГ</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f23;
+      color: #e0e0f0;
+      min-height: 100vh;
+      padding: 40px 16px;
+    }
+    .container { max-width: 680px; margin: 0 auto; }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #6366f1, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+    .subtitle { color: #666; font-size: .9rem; margin-bottom: 36px; }
+
+    /* Pipeline diagram */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 40px;
+      font-size: .82rem;
+    }
+    .step {
+      background: #1e1e3f;
+      border: 1px solid #2e2e5e;
+      border-radius: 8px;
+      padding: 7px 13px;
+      color: #a78bfa;
+      font-weight: 600;
+    }
+    .step small { display: block; color: #555; font-weight: 400; font-size: .72rem; margin-top: 2px; }
+    .arrow { color: #333; font-size: 1.1rem; }
+
+    /* Cards */
+    .card {
+      background: #1a1a35;
+      border: 1px solid #2a2a50;
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; color: #c4b5fd; margin-bottom: 16px; }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: .82rem;
+      font-weight: 500;
+    }
+    .badge.ok   { background: #14532d33; border: 1px solid #166534; color: #86efac; }
+    .badge.err  { background: #450a0a33; border: 1px solid #7f1d1d; color: #fca5a5; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.ok  { background: #22c55e; }
+    .dot.err { background: #ef4444; }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #1e1e3e;
+      font-size: .88rem;
+    }
+    .info-row:last-child { border-bottom: none; }
+    .info-row .label { color: #666; }
+    .info-row .value { color: #c4b5fd; font-weight: 500; }
+
+    .flow-step {
+      display: flex;
+      gap: 14px;
+      padding: 12px 0;
+      border-bottom: 1px solid #1e1e3e;
+      align-items: flex-start;
+      font-size: .88rem;
+    }
+    .flow-step:last-child { border-bottom: none; }
+    .flow-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .75rem;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .flow-title { font-weight: 600; color: #e0e0f0; margin-bottom: 2px; }
+    .flow-desc  { color: #666; font-size: .82rem; }
+
+    pre {
+      background: #0a0a1a;
+      border: 1px solid #1e1e3e;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: .8rem;
+      color: #7dd3fc;
+      overflow-x: auto;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Парсинг ТГ</h1>
+  <p class="subtitle">Тема в канале → одобрение → Gemini генерирует карусель → публикация в канал</p>
+
+  <div class="pipeline">
+    <div class="step">Тема в канале<small>пишешь текст</small></div>
+    <span class="arrow">→</span>
+    <div class="step">Одобрение<small>кнопка в личке</small></div>
+    <span class="arrow">→</span>
+    <div class="step">Gemini 2.5 Flash<small>план слайдов</small></div>
+    <span class="arrow">→</span>
+    <div class="step">Gemini Image Gen<small>картинки</small></div>
+    <span class="arrow">→</span>
+    <div class="step">Публикация<small>карусель в канал</small></div>
+  </div>
+
+  <!-- Status -->
+  <div class="card">
+    <h2>Статус сервиса</h2>
+    <div class="grid" id="status-grid">
+      <div class="badge err"><div class="dot err"></div>Загрузка…</div>
+    </div>
+    <div style="margin-top: 16px;" id="info-rows"></div>
+  </div>
+
+  <!-- Flow -->
+  <div class="card">
+    <h2>Как пользоваться</h2>
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div>
+        <div class="flow-title">Напиши тему в канале</div>
+        <div class="flow-desc">Просто опубликуй текст с темой или кратким описанием идеи для карусели.</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div>
+        <div class="flow-title">Одобри в личке у бота</div>
+        <div class="flow-desc">Бот пришлёт сообщение с кнопками «✅ Создать карусель» и «❌ Отклонить».</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">3</div>
+      <div>
+        <div class="flow-title">Gemini генерирует карусель</div>
+        <div class="flow-desc">Gemini 2.5 Flash разбивает тему на {{ slide_count }} слайдов → Gemini Image Gen рисует картинки.</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">4</div>
+      <div>
+        <div class="flow-title">Готово — карусель в канале</div>
+        <div class="flow-desc">Альбом из {{ slide_count }} слайдов автоматически публикуется в канале.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Config -->
+  <div class="card">
+    <h2>Настройка .env</h2>
+    <pre>TELEGRAM_BOT_TOKEN=...        # токен бота
+TELEGRAM_CHANNEL_CHAT_ID=... # ID канала (-100...)
+NOTIFY_CHAT_ID=...           # твой личный chat_id
+GEMINI_API_KEY=...           # ключ от Google AI Studio
+SLIDE_COUNT=5                # количество слайдов
+MODE=polling                 # polling | webhook
+WEBHOOK_URL=https://...      # если webhook</pre>
+  </div>
+
+</div>
+
+<script>
+async function loadStatus() {
+  const r = await fetch("/api/status");
+  const d = await r.json();
+  const grid = document.getElementById("status-grid");
+  const infoRows = document.getElementById("info-rows");
+
+  const checks = [
+    ["Gemini API",    d.gemini_key],
+    ["Bot Token",     d.bot_token],
+    ["Канал задан",   !!d.channel],
+    ["Notify Chat",   !!d.notify_chat],
+  ];
+  grid.innerHTML = checks.map(([label, ok]) => `
+    <div class="badge ${ok ? 'ok' : 'err'}">
+      <div class="dot ${ok ? 'ok' : 'err'}"></div>
+      ${ok ? '✓' : '✗'} ${label}
+    </div>`).join("");
+
+  const info = [
+    ["Канал",         d.channel   || "не задан"],
+    ["Notify Chat",   d.notify_chat || "не задан"],
+    ["Слайдов",       d.slide_count],
+    ["Ожидают одобр.", d.pending],
+  ];
+  infoRows.innerHTML = info.map(([label, value]) => `
+    <div class="info-row">
+      <span class="label">${label}</span>
+      <span class="value">${value}</span>
+    </div>`).join("");
+}
+loadStatus();
+setInterval(loadStatus, 15000);
+</script>
+</body>
+</html>

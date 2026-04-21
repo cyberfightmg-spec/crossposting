@@ -93,6 +93,56 @@ async def delete_webhook() -> dict:
             return await r.json()
 
 
+async def send_message_with_buttons(chat_id: str, text: str, buttons: list[list[dict]]) -> dict:
+    """Send a message with inline keyboard."""
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE_URL}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": buttons},
+        }) as r:
+            return await r.json()
+
+
+async def edit_message_text(chat_id: str, message_id: int, text: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE_URL}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }) as r:
+            return await r.json()
+
+
+async def answer_callback_query(callback_id: str, text: str = "") -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE_URL}/answerCallbackQuery", json={
+            "callback_query_id": callback_id,
+            "text": text,
+        }) as r:
+            return await r.json()
+
+
+async def send_photo_album(chat_id: str, images: list[bytes], caption: str = "") -> dict:
+    """Send up to 10 images as a media group (album) to a chat/channel."""
+    form = aiohttp.FormData()
+    media = []
+    for i, img_bytes in enumerate(images[:10]):
+        field_name = f"photo_{i}"
+        form.add_field(field_name, img_bytes, filename=f"slide_{i}.jpg", content_type="image/jpeg")
+        entry = {"type": "photo", "media": f"attach://{field_name}"}
+        if i == 0 and caption:
+            entry["caption"] = caption
+        media.append(entry)
+    form.add_field("chat_id", str(chat_id))
+    form.add_field("media", json.dumps(media))
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE_URL}/sendMediaGroup", data=form) as r:
+            return await r.json()
+
+
 carousel_buffer = {}
 carousel_lock = asyncio.Lock()
 
