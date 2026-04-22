@@ -191,6 +191,7 @@ async def _playwright_post(
 
     # Публикуем
     publish_selectors = [
+        'button:has-text("Отправить")',
         'button:has-text("Опубликовать")',
         '[data-testid="publish-btn"]',
         'button[type="submit"]:has-text("Опубликовать")',
