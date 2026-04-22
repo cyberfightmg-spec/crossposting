@@ -3,3 +3,8 @@
 pinterest_creds/
 *.log
 last_offset.json
+instagram_creds/
+# TenChat session — добавляй через git add -f только для переноса на сервер
+tenchat_session.json
+tenchat_token.json
+tenchat_api.json
