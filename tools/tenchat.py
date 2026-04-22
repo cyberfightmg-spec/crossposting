@@ -1,425 +1,366 @@
 """
-Tenchat API - Playwright-based automation for posting to tenchat.ru
-Вход по телефону с SMS-подтверждением + storage_state для сессии
+TenChat: гибридный клиент
+  1. Первый раз: Playwright логинится, перехватывает Bearer-токен + API-эндпоинты
+  2. Следующие разы: чистый httpx с сохранённым токеном (быстро, стабильно)
+  3. Если 401 / токен протух: автоматически обновляет через Playwright
 """
 import os
 import json
 import asyncio
+import logging
+import tempfile
+import httpx
 from pathlib import Path
-from typing import Optional, List, Union
-from playwright.async_api import async_playwright
-from dotenv import load_dotenv
+from typing import List, Union
+from playwright.async_api import async_playwright, BrowserContext, Page
 
-load_dotenv()
+log = logging.getLogger("crosspost.tenchat")
 
-TENCHAT_PHONE = os.getenv("TENCHAT_PHONE", "79169547408")
-TENCHAT_STATE_FILE = Path(__file__).parent.parent / "tenchat_session.json"
+TENCHAT_PHONE      = os.getenv("TENCHAT_PHONE", "")
+BASE_DIR           = Path(__file__).parent.parent
+STATE_FILE         = BASE_DIR / "tenchat_session.json"
+TOKEN_FILE         = BASE_DIR / "tenchat_token.json"
+API_FILE           = BASE_DIR / "tenchat_api.json"
+
+# ─── Хранилище токена и API-описания ──────────────────────────────────────────
+
+def _load_token() -> dict:
+    try:
+        return json.loads(TOKEN_FILE.read_text()) if TOKEN_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _save_token(token: str, extra: dict | None = None):
+    data = {"token": token, **(extra or {})}
+    TOKEN_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    log.info(f"TenChat: токен сохранён → {TOKEN_FILE}")
+
+
+def _load_api() -> dict:
+    try:
+        return json.loads(API_FILE.read_text()) if API_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _save_api(info: dict):
+    API_FILE.write_text(json.dumps(info, ensure_ascii=False, indent=2))
+    log.info(f"TenChat: API-описание сохранено → {API_FILE}")
 
 
 def has_credentials() -> bool:
-    """Check if Tenchat phone is configured."""
     return bool(TENCHAT_PHONE)
 
 
-class TenchatAgent:
-    """Async agent for posting to Tenchat using Playwright."""
-    
-    def __init__(self, headless: bool = True):
-        self.headless = headless
-        self.browser = None
-        self.context = None
-        self.page = None
-        self.playwright = None
-    
-    async def start(self):
-        """Initialize browser and context with saved session if exists."""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=self.headless,
-            args=['--no-sandbox', '--disable-setuid-sandbox']
-        )
-        
-        # Load storage state if exists
-        if TENCHAT_STATE_FILE.exists():
-            print("[TENCHAT] Loading saved session...")
-            self.context = await self.browser.new_context(
-                storage_state=str(TENCHAT_STATE_FILE),
-                viewport={"width": 1920, "height": 1080}
-            )
-        else:
-            self.context = await self.browser.new_context(
-                viewport={"width": 1920, "height": 1080}
-            )
-        
-        self.page = await self.context.new_page()
-    
-    async def stop(self):
-        """Close browser and cleanup."""
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
-    
-    async def _save_session(self):
-        """Save storage state to file."""
-        await self.context.storage_state(path=str(TENCHAT_STATE_FILE))
-        print(f"[TENCHAT] Session saved to {TENCHAT_STATE_FILE}")
-    
-    async def is_logged_in(self) -> bool:
-        """Check if currently logged in."""
-        try:
-            # Идём на главную и смотрим куда редиректнет
-            await self.page.goto("https://tenchat.ru", wait_until="domcontentloaded", timeout=10000)
-            await asyncio.sleep(2)
-            
-            current_url = self.page.url
-            print(f"[TENCHAT] Current URL: {current_url}")
-            
-            # Если на странице входа - не авторизованы
-            if "/auth" in current_url or "/login" in current_url:
-                print("[TENCHAT] On login page - not logged in")
-                return False
-            
-            # Если на главной или feed - авторизованы
-            if current_url in ["https://tenchat.ru/", "https://tenchat.ru", "https://tenchat.ru/feed"]:
-                print("[TENCHAT] On feed page - logged in")
-                return True
-            
-            # Проверяем наличие элементов ленты
-            feed_selectors = [
-                '[data-testid="feed"]',
-                '.feed',
-                '[data-testid="create-post"]',
-                '.post-creator',
-                'button:has-text("Написать")',
-                'a[href="/feed"]'
-            ]
-            
-            for selector in feed_selectors:
-                try:
-                    element = await self.page.wait_for_selector(selector, timeout=2000)
-                    if element:
-                        print(f"[TENCHAT] Found feed element: {selector}")
-                        return True
-                except:
-                    continue
-            
-            print(f"[TENCHAT] No feed elements found - probably not logged in")
-            return False
-            
-        except Exception as e:
-            print(f"[TENCHAT] Error checking login status: {e}")
-            return False
-    
-    async def login(self) -> bool:
-        """Login to Tenchat via phone with SMS verification."""
-        print(f"[TENCHAT] Checking login status...")
-        
-        # Load session if exists
-        if TENCHAT_STATE_FILE.exists():
-            print(f"[TENCHAT] Found session file: {TENCHAT_STATE_FILE}")
-        
-        # Check if already logged in via saved session
-        if await self.is_logged_in():
-            print("[TENCHAT] Already logged in via saved session")
-            await self._save_session()  # Refresh session
-            return True
-        
-        print(f"[TENCHAT] Not logged in, session may be expired")
-        print(f"[TENCHAT] Please re-login via browser manually")
+# ─── Перехват токена из браузерных запросов ───────────────────────────────────
+
+class _TokenCapture:
+    """Перехватывает Bearer-токен и POST-эндпоинты из сетевых запросов Playwright."""
+
+    def __init__(self):
+        self.token: str | None = None
+        self.post_endpoints: list[dict] = []
+
+    def on_request(self, request):
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer ") and not self.token:
+            self.token = auth.split(" ", 1)[1]
+            log.info(f"TenChat: Bearer-токен перехвачен (len={len(self.token)})")
+
+    def on_response_post(self, response):
+        if response.request.method == "POST" and response.status in (200, 201):
+            url = response.url
+            # Ищем эндпоинты публикации (обычно содержат "post", "feed", "article")
+            keywords = ("post", "feed", "article", "publication", "create", "wall")
+            if any(k in url.lower() for k in keywords):
+                self.post_endpoints.append({
+                    "url": url,
+                    "status": response.status,
+                })
+                log.info(f"TenChat: POST-эндпоинт найден: {url}")
+
+
+# ─── Playwright: логин и разовая публикация ───────────────────────────────────
+
+async def _playwright_login_and_capture(capture: _TokenCapture) -> BrowserContext | None:
+    """
+    Запускает браузер, восстанавливает сессию или сообщает о необходимости ручного входа.
+    Подключает перехват токена. Возвращает context или None при ошибке.
+    """
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+
+    storage = str(STATE_FILE) if STATE_FILE.exists() else None
+    context = await browser.new_context(
+        storage_state=storage,
+        viewport={"width": 1280, "height": 900},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+    context.on("request", capture.on_request)
+    context.on("response", capture.on_response_post)
+    return context, browser, pw
+
+
+async def _check_logged_in(page: Page) -> bool:
+    await page.goto("https://tenchat.ru/feed", wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(3000)
+    url = page.url
+    if "/auth" in url or "/login" in url or "sign" in url:
         return False
-        await asyncio.sleep(3)
-        
-        try:
-            # Find phone input
-            print("[TENCHAT] Looking for phone input...")
-            phone_input = await self.page.wait_for_selector(
-                'input[type="tel"], input[name="phone"], input[placeholder*="телефон"]', 
-                timeout=5000
-            )
-            
-            # Fill phone
-            phone_formatted = f"+{TENCHAT_PHONE}"
-            await phone_input.fill(phone_formatted)
-            await asyncio.sleep(0.5)
-            print(f"[TENCHAT] Phone filled: {phone_formatted}")
-            
-            # Click submit
-            submit_btn = await self.page.wait_for_selector(
-                'button[type="submit"], button:has-text("Продолжить"), button:has-text("Получить код")',
-                timeout=5000
-            )
-            await submit_btn.click()
-            print("[TENCHAT] Waiting for SMS code input...")
-            
-            # Wait for SMS code field
-            await asyncio.sleep(2)
-            code_input = await self.page.wait_for_selector(
-                'input[name="code"], input[type="text"][inputmode="numeric"], input[placeholder*="код"]',
-                timeout=10000
-            )
-            
-            if code_input:
-                print("\n" + "="*50)
-                print("[TENCHAT] ВВЕДИТЕ КОД ИЗ SMS!")
-                print("[TENCHAT] У тебя 60 секунд...")
-                print("="*50 + "\n")
-                
-                # Wait for manual code entry
-                await asyncio.sleep(60)
-                
-                # Check if login successful
-                if await self.is_logged_in():
-                    await self._save_session()
-                    print("[TENCHAT] Login successful!")
-                    return True
-                else:
-                    print("[TENCHAT] Login failed after code entry")
-                    return False
-            else:
-                print("[TENCHAT] Code input not found")
-                return False
-                
-        except Exception as e:
-            print(f"[TENCHAT] Login error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    async def post_text(self, text: str, title: str = "") -> dict:
-        """Post text to Tenchat."""
-        try:
-            await self.page.goto("https://tenchat.ru/feed")
-            await asyncio.sleep(2)
-            
-            # Click create post button
-            create_btn = await self.page.wait_for_selector(
-                'button:has-text("Написать"), [data-testid="create-post"], .post-creator',
-                timeout=5000
-            )
-            await create_btn.click()
-            await asyncio.sleep(1)
-            
-            # Fill title if provided
-            if title:
-                title_input = await self.page.query_selector('input[placeholder*="заголовок"], input[name="title"]')
-                if title_input:
-                    await title_input.fill(title)
-                    await asyncio.sleep(0.5)
-            
-            # Fill text
-            text_input = await self.page.wait_for_selector(
-                'div[contenteditable="true"], textarea[placeholder*="текст"], textarea',
-                timeout=5000
-            )
-            await text_input.fill(text)
-            await asyncio.sleep(1)
-            
-            # Publish
-            publish_btn = await self.page.wait_for_selector(
-                'button:has-text("Опубликовать"), button[type="submit"]',
-                timeout=5000
-            )
-            await publish_btn.click()
-            await asyncio.sleep(3)
-            
-            return {"status": "ok", "platform": "tenchat", "type": "text"}
-            
-        except Exception as e:
-            print(f"[TENCHAT] Error posting text: {e}")
-            return {"status": "error", "error": str(e)}
-    
-    async def post_photo(self, image_paths: List[Union[str, bytes]], caption: str = "", title: str = "") -> dict:
-        """Post photo(s) to Tenchat."""
-        print(f"[TENCHAT] Starting photo post, images: {len(image_paths)}")
-        try:
-            # Проверяем текущий URL - возможно мы уже на нужной странице
-            current_url = self.page.url
-            print(f"[TENCHAT] Current URL before goto: {current_url}")
-            
-            if "tenchat.ru" not in current_url:
-                print("[TENCHAT] Navigating to feed...")
-                await self.page.goto("https://tenchat.ru/feed", wait_until="commit", timeout=10000)
-            else:
-                print("[TENCHAT] Already on tenchat, refreshing...")
-                await self.page.reload(wait_until="commit", timeout=10000)
-            
-            print("[TENCHAT] On feed page")
-            await asyncio.sleep(5)  # Ждём загрузку JS
-            
-            # Click create post - пробуем разные селекторы
-            print("[TENCHAT] Looking for create post button...")
-            create_btn = None
-            for selector in [
-                'button:has-text("Написать")',
-                'a:has-text("Написать")',
-                '[data-testid="create-post"]',
-                '.post-creator',
-                'button svg',  # кнопка с иконкой
-            ]:
-                try:
-                    create_btn = await self.page.wait_for_selector(selector, timeout=3000)
-                    if create_btn:
-                        print(f"[TENCHAT] Found button: {selector}")
-                        break
-                except:
-                    continue
-            
-            if not create_btn:
-                print("[TENCHAT] ERROR: Could not find create post button")
-                # Делаем скриншот для диагностики
-                await self.page.screenshot(path="/root/crossposting/tenchat_debug.png")
-                return {"status": "error", "error": "Create post button not found"}
-            print("[TENCHAT] Clicking create post button")
-            await create_btn.click()
-            await asyncio.sleep(1)
-            
-            # Fill title if provided
-            if title:
-                print("[TENCHAT] Filling title...")
-                title_input = await self.page.query_selector('input[placeholder*="заголовок"], input[name="title"]')
-                if title_input:
-                    await title_input.fill(title)
-                    await asyncio.sleep(0.5)
-            
-            # Fill caption
-            if caption:
-                print("[TENCHAT] Filling caption...")
-                text_input = await self.page.wait_for_selector(
-                    'div[contenteditable="true"], textarea',
-                    timeout=10000
-                )
-                await text_input.fill(caption)
-                await asyncio.sleep(0.5)
-            
-            # Upload images
-            print("[TENCHAT] Uploading images...")
-            file_input = await self.page.wait_for_selector(
-                'input[type="file"][accept*="image"]',
-                timeout=10000
-            )
-            
-            for i, img_path in enumerate(image_paths):
-                print(f"[TENCHAT] Uploading image {i+1}/{len(image_paths)}...")
-                if isinstance(img_path, bytes):
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                        f.write(img_path)
-                        tmp_path = f.name
-                    await file_input.set_input_files(tmp_path)
-                    os.unlink(tmp_path)
-                else:
-                    await file_input.set_input_files(img_path)
-                await asyncio.sleep(1)
-            
-            await asyncio.sleep(2)
-            
-            # Publish
-            print("[TENCHAT] Clicking publish button...")
-            publish_btn = await self.page.wait_for_selector('button:has-text("Опубликовать")', timeout=5000)
-            await publish_btn.click()
-            await asyncio.sleep(3)
-            
-            print("[TENCHAT] Photo posted successfully!")
-            return {"status": "ok", "platform": "tenchat", "type": "photo"}
-            
-        except Exception as e:
-            print(f"[TENCHAT] Error posting photo: {e}")
-            return {"status": "error", "error": str(e)}
-    
-    async def post_video(self, video_bytes: bytes, caption: str = "", title: str = "") -> dict:
-        """Post video to Tenchat."""
-        try:
-            await self.page.goto("https://tenchat.ru/feed")
-            await asyncio.sleep(2)
-            
-            # Click create post
-            create_btn = await self.page.wait_for_selector(
-                'button:has-text("Написать"), [data-testid="create-post"]',
-                timeout=5000
-            )
-            await create_btn.click()
-            await asyncio.sleep(1)
-            
-            # Fill title if provided
-            if title:
-                title_input = await self.page.query_selector('input[placeholder*="заголовок"], input[name="title"]')
-                if title_input:
-                    await title_input.fill(title)
-                    await asyncio.sleep(0.5)
-            
-            # Fill caption
-            if caption:
-                text_input = await self.page.wait_for_selector(
-                    'div[contenteditable="true"], textarea',
-                    timeout=5000
-                )
-                await text_input.fill(caption)
-                await asyncio.sleep(0.5)
-            
-            # Upload video
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-                f.write(video_bytes)
-                tmp_path = f.name
-            
-            file_input = await self.page.wait_for_selector(
-                'input[type="file"][accept*="video"]',
-                timeout=5000
-            )
-            await file_input.set_input_files(tmp_path)
-            await asyncio.sleep(2)
-            
-            os.unlink(tmp_path)
-            
-            # Wait for upload processing
-            print("[TENCHAT] Waiting for video upload...")
-            await asyncio.sleep(15)
-            
-            # Publish
-            publish_btn = await self.page.wait_for_selector('button:has-text("Опубликовать")', timeout=5000)
-            await publish_btn.click()
-            await asyncio.sleep(3)
-            
-            return {"status": "ok", "platform": "tenchat", "type": "video"}
-            
-        except Exception as e:
-            print(f"[TENCHAT] Error posting video: {e}")
-            return {"status": "error", "error": str(e)}
+    # Ждём характерные элементы ленты
+    try:
+        await page.wait_for_selector(
+            '[data-testid="create-post-btn"], button:has-text("Написать"), .feed-container',
+            timeout=8000,
+        )
+        return True
+    except Exception:
+        return "auth" not in page.url
 
 
-# Convenience functions
+async def _playwright_post(
+    page: Page, context: BrowserContext, text: str, image_paths: list[str]
+) -> bool:
+    """Публикует пост через браузер. Возвращает True при успехе."""
+
+    # Открываем форму создания поста
+    selectors_create = [
+        '[data-testid="create-post-btn"]',
+        'button:has-text("Написать")',
+        'a:has-text("Написать")',
+        '[class*="create"][class*="post"]',
+        '[class*="NewPost"]',
+    ]
+    create_btn = None
+    for sel in selectors_create:
+        try:
+            create_btn = await page.wait_for_selector(sel, timeout=4000, state="visible")
+            if create_btn:
+                break
+        except Exception:
+            continue
+
+    if not create_btn:
+        await page.screenshot(path=str(BASE_DIR / "tenchat_debug.png"))
+        log.error("TenChat: кнопка создания поста не найдена, сохранён скриншот")
+        return False
+
+    await create_btn.click()
+    await page.wait_for_timeout(1500)
+
+    # Вводим текст
+    text_selectors = [
+        'div[contenteditable="true"]',
+        'textarea[placeholder]',
+        '[data-testid="post-text-input"]',
+    ]
+    for sel in text_selectors:
+        try:
+            el = await page.wait_for_selector(sel, timeout=5000, state="visible")
+            if el:
+                await el.click()
+                await el.fill(text)
+                break
+        except Exception:
+            continue
+
+    await page.wait_for_timeout(500)
+
+    # Загружаем изображения если есть
+    if image_paths:
+        file_input_sel = 'input[type="file"][accept*="image"], input[type="file"]'
+        try:
+            file_input = await page.wait_for_selector(file_input_sel, timeout=6000)
+            if file_input:
+                await file_input.set_input_files(image_paths[:9])
+                await page.wait_for_timeout(3000)
+        except Exception as e:
+            log.warning(f"TenChat: загрузка файлов не удалась — {e}")
+
+    # Публикуем
+    publish_selectors = [
+        'button:has-text("Опубликовать")',
+        '[data-testid="publish-btn"]',
+        'button[type="submit"]:has-text("Опубликовать")',
+    ]
+    for sel in publish_selectors:
+        try:
+            btn = await page.wait_for_selector(sel, timeout=6000, state="visible")
+            if btn:
+                await btn.click()
+                await page.wait_for_timeout(4000)
+                log.info("TenChat: пост опубликован через браузер ✅")
+                # Сохраняем обновлённую сессию
+                await context.storage_state(path=str(STATE_FILE))
+                return True
+        except Exception:
+            continue
+
+    log.error("TenChat: кнопка публикации не найдена")
+    return False
+
+
+# ─── httpx: прямое API-постинг ────────────────────────────────────────────────
+
+async def _api_post(token: str, text: str, image_paths: list[str]) -> dict | None:
+    """
+    Публикует пост через перехваченный API.
+    Структура эндпоинта и тела сохранены в tenchat_api.json после первой
+    публикации через браузер.
+    """
+    api = _load_api()
+    endpoint = api.get("create_post_url")
+    if not endpoint:
+        log.info("TenChat: API-эндпоинт ещё не обнаружен, используем браузер")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://tenchat.ru",
+        "Referer": "https://tenchat.ru/feed",
+    }
+
+    # Базовая структура тела (уточняется после первой публикации)
+    body_template = api.get("body_template", {})
+    body = {**body_template, "text": text}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(endpoint, json=body, headers=headers)
+        if r.status_code in (200, 201):
+            log.info(f"TenChat: пост опубликован через API ✅ ({r.status_code})")
+            return r.json()
+        if r.status_code in (401, 403):
+            log.warning(f"TenChat: токен устарел ({r.status_code})")
+            return None  # сигнал для обновления токена
+        log.error(f"TenChat: API ошибка {r.status_code}: {r.text[:300]}")
+        return None
+    except Exception as e:
+        log.error(f"TenChat: httpx ошибка — {e}")
+        return None
+
+
+# ─── Главная функция публикации ───────────────────────────────────────────────
+
+async def _post_with_refresh(
+    text: str,
+    image_paths: list[str],
+    force_browser: bool = False,
+) -> dict:
+    """
+    Пробует httpx с сохранённым токеном.
+    Если нет токена / 401 / force_browser — логинится через Playwright,
+    перехватывает новый токен и публикует.
+    """
+    # 1. Попытка через httpx
+    if not force_browser:
+        token_data = _load_token()
+        token = token_data.get("token")
+        if token:
+            result = await _api_post(token, text, image_paths)
+            if result is not None:
+                return {"status": "ok", "platform": "tenchat", "method": "api", "data": result}
+            # 401 — токен протух, идём обновлять
+            log.info("TenChat: токен протух, обновляем через браузер")
+
+    # 2. Playwright: логин + публикация + перехват нового токена
+    capture = _TokenCapture()
+    context, browser, pw = await _playwright_login_and_capture(capture)
+    try:
+        page = await context.new_page()
+        page.on("request", capture.on_request)
+
+        logged_in = await _check_logged_in(page)
+        if not logged_in:
+            log.error(
+                "TenChat: сессия устарела — нужно войти вручную.\n"
+                f"Удали {STATE_FILE} и запусти: python3 tools/tenchat_login.py"
+            )
+            return {"status": "error", "error": "TenChat session expired, manual login required"}
+
+        # Публикуем через UI, одновременно перехватываем токен
+        ok = await _playwright_post(page, context, text, image_paths)
+
+        # Сохраняем перехваченный токен
+        if capture.token:
+            _save_token(capture.token)
+
+        # Сохраняем обнаруженные POST-эндпоинты для будущих API-вызовов
+        if capture.post_endpoints:
+            api_data = _load_api()
+            # Берём первый подходящий эндпоинт как кандидата
+            api_data["create_post_url"] = capture.post_endpoints[0]["url"]
+            api_data["all_post_endpoints"] = capture.post_endpoints
+            _save_api(api_data)
+            log.info(f"TenChat: обнаружено {len(capture.post_endpoints)} POST-эндпоинт(ов)")
+
+        return {
+            "status": "ok" if ok else "error",
+            "platform": "tenchat",
+            "method": "playwright",
+        }
+    finally:
+        await browser.close()
+        await pw.stop()
+
+
+# ─── Публичные функции (вызываются из main.py) ────────────────────────────────
+
 async def post_text_tenchat(text: str, title: str = "") -> dict:
-    """Post text to Tenchat."""
-    agent = TenchatAgent(headless=True)
-    try:
-        await agent.start()
-        if await agent.login():
-            return await agent.post_text(text, title)
-        return {"status": "error", "error": "Login failed"}
-    finally:
-        await agent.stop()
+    full_text = f"{title}\n\n{text}" if title else text
+    return await _post_with_refresh(full_text, [])
 
 
-async def post_photo_tenchat(image_paths: List[Union[str, bytes]], caption: str = "", title: str = "") -> dict:
-    """Post photo to Tenchat."""
-    agent = TenchatAgent(headless=True)
+async def post_photo_tenchat(
+    image_paths: List[Union[str, bytes]], caption: str = "", title: str = ""
+) -> dict:
+    # Байты → временные файлы
+    tmp_files = []
+    real_paths = []
     try:
-        await agent.start()
-        if await agent.login():
-            return await agent.post_photo(image_paths, caption, title)
-        return {"status": "error", "error": "Login failed"}
+        for img in image_paths:
+            if isinstance(img, bytes):
+                f = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                f.write(img)
+                f.close()
+                tmp_files.append(f.name)
+                real_paths.append(f.name)
+            else:
+                real_paths.append(str(img))
+
+        full_text = f"{title}\n\n{caption}" if title else caption
+        return await _post_with_refresh(full_text, real_paths)
     finally:
-        await agent.stop()
+        for p in tmp_files:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 async def post_video_tenchat(video_bytes: bytes, caption: str = "", title: str = "") -> dict:
-    """Post video to Tenchat."""
-    agent = TenchatAgent(headless=True)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        f.write(video_bytes)
+        tmp_path = f.name
     try:
-        await agent.start()
-        if await agent.login():
-            return await agent.post_video(video_bytes, caption, title)
-        return {"status": "error", "error": "Login failed"}
+        full_text = f"{title}\n\n{caption}" if title else caption
+        return await _post_with_refresh(full_text, [tmp_path])
     finally:
-        await agent.stop()
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
