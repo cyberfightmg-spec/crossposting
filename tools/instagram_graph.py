@@ -6,8 +6,8 @@ import httpx
 log = logging.getLogger("crosspost.instagram_graph")
 
 IG_USER_ID      = os.getenv("INSTAGRAM_USER_ID", "")
-IG_ACCESS_TOKEN = os.getenv("INSTAGRAM_GRAPH_TOKEN", "")
-IG_API          = "https://graph.instagram.com/v21.0"
+IG_ACCESS_TOKEN = os.getenv("INSTAGRAM_GRAPH_TOKEN", "") or os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+IG_API          = "https://graph.facebook.com/v21.0"
 OPENAI_KEY      = os.getenv("OPENAI_API_KEY", "")
 
 

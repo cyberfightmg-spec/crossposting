@@ -5,8 +5,11 @@ import time
 import base64
 import httpx
 from PIL import Image
+from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 from tools.image_utils import fit_image
+
+load_dotenv()
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
