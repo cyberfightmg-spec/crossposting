@@ -3,3 +3,12 @@
 pinterest_creds/
 *.log
 last_offset.json
+
+# Secrets and credentials
+.env
+client_secrets.json
+youtube_client_secret.json
+tenchat_session.json
+pinterest_token.json
+*.pem
+*.key

@@ -16,7 +16,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 from tools.router import detect_type
 from tools.telegram import send_message, notify_admin, BASE_URL
-from tools.vk import post_text_vk, post_photo_vk, post_video_vk
+from tools.vk import post_text_vk, post_photo_vk, post_video_vk, post_story_vk
 from tools.dzen import post_dzen
 from tools.pinterest import post_to_pinterest, _refresh_access_token
 from tools.wordstat import get_keywords
@@ -34,6 +34,12 @@ from tools.instagram_media import (
     save_video_with_cover,
     cleanup_dated_folder,
 )
+from tools.tenchat import (
+    post_text_tenchat,
+    post_photo_tenchat,
+    post_video_tenchat,
+    has_credentials as tenchat_configured,
+)
 
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -49,6 +55,7 @@ ENABLED_PLATFORMS = {
     "instagram": os.getenv("INSTAGRAM_ENABLED", "false").lower() == "true",
     "pinterest": os.getenv("PINTEREST_ENABLED", "false").lower() == "true",
     "linkedin": os.getenv("LINKEDIN_ENABLED", "false").lower() == "true",
+    "tenchat": os.getenv("TENCHAT_ENABLED", "false").lower() == "true" and tenchat_configured(),
 }
 
 
@@ -105,10 +112,11 @@ async def send_crosspost_notification(channel_post: dict, result: dict) -> None:
     platforms = result.get("platforms", {})
     platform_names = {
         "vk": "VK",
-        "instagram": "Instagram", 
+        "instagram": "Instagram",
         "pinterest": "Pinterest",
         "dzen": "Дзен",
         "youtube": "YouTube",
+        "tenchat": "TenChat",
     }
     
     for platform, status in platforms.items():
@@ -275,11 +283,24 @@ async def _do_crosspost(channel_post: dict) -> dict:
             except Exception as e:
                 result["errors"].append(f"youtube: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_dzen(), run_youtube())
+        async def run_tenchat():
+            if not ENABLED_PLATFORMS["tenchat"]:
+                result["platforms"]["tenchat"] = "disabled"
+                return
+            try:
+                adapted = await adapt_vk(text)
+                tenchat_result = await post_text_tenchat(adapted)
+                result["platforms"]["tenchat"] = "ok" if tenchat_result.get("status") == "ok" else "error"
+            except Exception as e:
+                result["platforms"]["tenchat"] = "error"
+                result["errors"].append(f"tenchat: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_dzen(), run_youtube(), run_tenchat())
 
     elif content_type == "SLIDES":
         file_ids = [p["file_id"] for p in photos]
         caption = channel_post.get("caption", "")
+        adapted_caption = await adapt_vk(caption) if caption else ""
         print(f"[DEBUG] SLIDES: {len(file_ids)} photos, {len(set(file_ids))} unique file_ids")
 
         carousel = await process_carousel(file_ids)
@@ -289,7 +310,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_photo_vk(carousel["local_paths"], caption, carousel=True)
+                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption or caption, carousel=True)
                 if vk_result.get("response"):
                     result["platforms"]["vk"] = "ok"
                 else:
@@ -347,12 +368,40 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
                     asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
-        await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram())
+        async def run_vk_story():
+            if not ENABLED_PLATFORMS["vk"]:
+                result["platforms"]["vk_story"] = "disabled"
+                return
+            try:
+                photo_bytes = open(carousel["local_paths"][0], "rb").read()
+                story_result = await post_story_vk(photo_bytes, adapted_caption or caption)
+                result["platforms"]["vk_story"] = "ok" if story_result.get("response", {}).get("count", 0) > 0 else "error"
+                if story_result.get("response", {}).get("count", 0) == 0:
+                    result["errors"].append(f"vk_story: {story_result.get('error', 'no stories saved')}")
+            except Exception as e:
+                result["platforms"]["vk_story"] = "error"
+                result["errors"].append(f"vk_story: {str(e)}")
+
+        async def run_tenchat_slides():
+            if not ENABLED_PLATFORMS["tenchat"]:
+                result["platforms"]["tenchat"] = "disabled"
+                return
+            try:
+                tenchat_result = await post_photo_tenchat(carousel["local_paths"], adapted_caption or caption)
+                result["platforms"]["tenchat"] = "ok" if tenchat_result.get("status") == "ok" else "error"
+            except Exception as e:
+                result["platforms"]["tenchat"] = "error"
+                result["errors"].append(f"tenchat: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram(), run_vk_story(), run_tenchat_slides())
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "PHOTO":
         file_id = channel_post["photo"][-1]["file_id"]
         caption = channel_post.get("caption", "")
+        print(f"[ADAPT] Original caption: {caption[:100]}...")
+        adapted_caption = await adapt_vk(caption) if caption else ""
+        print(f"[ADAPT] Adapted caption: {adapted_caption[:100]}...")
 
         carousel = await process_carousel([file_id])
 
@@ -361,7 +410,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_photo_vk(carousel["local_paths"], caption)
+                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption or caption)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
             except Exception as e:
                 result["platforms"]["vk"] = "error"
@@ -403,12 +452,40 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
                     asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
-        await asyncio.gather(run_vk(), run_pinterest(), run_instagram())
+        async def run_vk_story():
+            if not ENABLED_PLATFORMS["vk"]:
+                result["platforms"]["vk_story"] = "disabled"
+                return
+            try:
+                photo_bytes = open(carousel["local_paths"][0], "rb").read()
+                story_result = await post_story_vk(photo_bytes, adapted_caption or caption)
+                result["platforms"]["vk_story"] = "ok" if story_result.get("response", {}).get("count", 0) > 0 else "error"
+                if story_result.get("response", {}).get("count", 0) == 0:
+                    result["errors"].append(f"vk_story: {story_result.get('error', 'no stories saved')}")
+            except Exception as e:
+                result["platforms"]["vk_story"] = "error"
+                result["errors"].append(f"vk_story: {str(e)}")
+
+        async def run_tenchat_photo():
+            if not ENABLED_PLATFORMS["tenchat"]:
+                result["platforms"]["tenchat"] = "disabled"
+                return
+            try:
+                tenchat_result = await post_photo_tenchat(carousel["local_paths"], adapted_caption or caption)
+                result["platforms"]["tenchat"] = "ok" if tenchat_result.get("status") == "ok" else "error"
+            except Exception as e:
+                result["platforms"]["tenchat"] = "error"
+                result["errors"].append(f"tenchat: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_pinterest(), run_instagram(), run_vk_story(), run_tenchat_photo())
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "VIDEO":
         video_obj = channel_post.get("video") or channel_post.get("animation", {})
         caption   = channel_post.get("caption", "")
+        print(f"[ADAPT] Original caption: {caption[:100]}...")
+        adapted_caption = await adapt_vk(caption) if caption else ""
+        print(f"[ADAPT] Adapted caption: {adapted_caption[:100]}...")
         file_id   = video_obj.get("file_id", "")
         file_size = video_obj.get("file_size", 0)
         thumb_obj = video_obj.get("thumbnail") or video_obj.get("thumb")
@@ -439,7 +516,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_video_vk(video_bytes, caption)
+                vk_result = await post_video_vk(video_bytes, adapted_caption or caption)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
                 if not vk_result.get("response"):
                     result["errors"].append(f"vk: {vk_result.get('error', 'unknown')}")
@@ -459,9 +536,9 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     _, video_url, _, cover_url = save_video_with_cover(
                         video_bytes, thumbnail_bytes, folder_name
                     )
-                    ig_result = await ig_post_reel(video_url, caption, cover_url)
+                    ig_result = await ig_post_reel(video_url, adapted_caption or caption, cover_url)
                 else:
-                    ig_result = await post_reel_instagram(video_bytes, caption, thumbnail_bytes)
+                    ig_result = await post_reel_instagram(video_bytes, adapted_caption or caption, thumbnail_bytes)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
                 if ig_result.get("status") != "ok":
                     result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
@@ -473,7 +550,20 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
                     asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
-        await asyncio.gather(run_vk_video(), run_instagram_reel())
+        async def run_tenchat_video():
+            if not ENABLED_PLATFORMS["tenchat"]:
+                result["platforms"]["tenchat"] = "disabled"
+                return
+            try:
+                tenchat_result = await post_video_tenchat(video_bytes, adapted_caption or caption)
+                result["platforms"]["tenchat"] = "ok" if tenchat_result.get("status") == "ok" else "error"
+                if tenchat_result.get("status") != "ok":
+                    result["errors"].append(f"tenchat: {tenchat_result.get('error', 'unknown')}")
+            except Exception as e:
+                result["platforms"]["tenchat"] = "error"
+                result["errors"].append(f"tenchat: {str(e)}")
+
+        await asyncio.gather(run_vk_video(), run_instagram_reel(), run_tenchat_video())
 
     if result["errors"]:
         result["status"] = "partial" if result["platforms"] else "error"

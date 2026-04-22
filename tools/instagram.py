@@ -4,7 +4,10 @@ import asyncio
 import logging
 from pathlib import Path
 from PIL import Image
+from dotenv import load_dotenv
 from instagrapi import Client
+
+load_dotenv()
 from instagrapi.exceptions import (
     LoginRequired, BadPassword, ChallengeRequired,
     TwoFactorRequired, PleaseWaitFewMinutes, UserNotFound
