@@ -1,10 +1,13 @@
 """
-Запуск на сервере (без дисплея):
+ЗАПУСКАЙ НА СВОЁМ КОМПЬЮТЕРЕ (не на сервере):
+
+  pip install playwright
+  playwright install chromium
   python3 tenchat_capture.py
 
-Скрипт headless — браузер невидим, но работает полностью.
-Номер телефона берётся из .env (TENCHAT_PHONE).
-SMS-код вводишь в терминале.
+Откроется браузер, войди в TenChat, нажми Enter.
+Файлы tenchat_session.json и tenchat_token.json сохранятся рядом.
+Потом залей их на сервер через scp или git.
 """
 import asyncio
 import json
@@ -12,9 +15,8 @@ import os
 import sys
 from pathlib import Path
 
-BASE_DIR     = Path(__file__).parent
-SESSION_FILE = BASE_DIR / "tenchat_session.json"
-TOKEN_FILE   = BASE_DIR / "tenchat_token.json"
+SESSION_FILE = Path("tenchat_session.json")
+TOKEN_FILE   = Path("tenchat_token.json")
 PHONE        = os.getenv("TENCHAT_PHONE", "")
 
 
@@ -22,29 +24,24 @@ async def main():
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("❌ Playwright не установлен.")
-        print("   pip install playwright && playwright install chromium")
-        sys.exit(1)
-
-    if not PHONE:
-        print("❌ Задай TENCHAT_PHONE=79XXXXXXXXX в .env")
+        print("❌  Установи playwright:")
+        print("    pip install playwright")
+        print("    playwright install chromium")
         sys.exit(1)
 
     captured = {"token": None}
 
-    print("=" * 50)
-    print("  TenChat — захват сессии (server mode)")
-    print("=" * 50)
-    print(f"Телефон: +{PHONE}")
-    print()
+    print("=" * 52)
+    print("  TenChat — захват сессии")
+    print("=" * 52)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
-            headless=True,
+            headless=False,          # видимый браузер
             args=[
                 "--no-sandbox",
-                "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
+                "--start-maximized",
             ],
         )
         context = await browser.new_context(
@@ -57,168 +54,106 @@ async def main():
             locale="ru-RU",
         )
 
+        # Перехватываем Bearer-токен из любого запроса браузера
         def on_request(request):
             auth = request.headers.get("authorization", "")
             if auth.startswith("Bearer ") and not captured["token"]:
                 captured["token"] = auth.split(" ", 1)[1]
-                print("✅ Bearer-токен перехвачен!")
+                print("\n✅  Bearer-токен перехвачен автоматически!")
 
         context.on("request", on_request)
         page = await context.new_page()
 
-        # ── Шаг 1: открываем страницу входа ──────────────────────────────────
-        print("Открываем tenchat.ru/auth ...")
-        await page.goto("https://tenchat.ru/auth", wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2000)
-        print(f"URL: {page.url}")
+        print("\nОткрываем tenchat.ru ...")
+        await page.goto("https://tenchat.ru/auth", wait_until="domcontentloaded", timeout=60000)
 
-        # ── Шаг 2: вводим телефон ─────────────────────────────────────────────
-        phone_sel = (
-            'input[type="tel"], '
-            'input[name="phone"], '
-            'input[placeholder*="Номер"], '
-            'input[placeholder*="телефон"], '
-            'input[placeholder*="номер"]'
-        )
-        try:
-            inp = await page.wait_for_selector(phone_sel, timeout=10000, state="visible")
-            await inp.click()
-            await inp.fill(f"+{PHONE}")
-            print(f"Телефон введён: +{PHONE}")
-        except Exception:
-            phone_val = PHONE
-            print(f"Поле телефона не найдено автоматически.")
-            print(f"Введи номер вручную если скрипт завис, или проверь страницу.")
-
-        await page.wait_for_timeout(500)
-
-        # ── Шаг 3: нажимаем «Продолжить» ─────────────────────────────────────
-        submit_sel = (
-            'button[type="submit"], '
-            'button:has-text("Продолжить"), '
-            'button:has-text("Получить код"), '
-            'button:has-text("Войти")'
-        )
-        try:
-            btn = await page.wait_for_selector(submit_sel, timeout=8000, state="visible")
-            await btn.click()
-            print("Запрос на SMS отправлен.")
-        except Exception as e:
-            print(f"Кнопка «Продолжить» не найдена: {e}")
-            print("Возможно, форма выглядит иначе. Сохраняем скриншот для диагностики.")
-            await page.screenshot(path=str(BASE_DIR / "tenchat_debug.png"))
-            print(f"Скриншот: {BASE_DIR / 'tenchat_debug.png'}")
-
-        await page.wait_for_timeout(2000)
-
-        # ── Шаг 4: ждём SMS-код от пользователя ──────────────────────────────
-        print()
-        print("┌──────────────────────────────────────┐")
-        print("│  Введи SMS-код из телефона:          │")
-        print("└──────────────────────────────────────┘")
-        sms_code = input("SMS-код: ").strip()
-
-        # Вводим код
-        code_sel = (
-            'input[name="code"], '
-            'input[type="text"][inputmode="numeric"], '
-            'input[placeholder*="код"], '
-            'input[placeholder*="Код"], '
-            'input[autocomplete="one-time-code"]'
-        )
-        try:
-            code_inp = await page.wait_for_selector(code_sel, timeout=10000, state="visible")
-            await code_inp.fill(sms_code)
-            await page.wait_for_timeout(500)
-
-            # Пробуем нажать подтвердить
-            confirm_sel = (
-                'button[type="submit"], '
-                'button:has-text("Подтвердить"), '
-                'button:has-text("Войти"), '
-                'button:has-text("Продолжить")'
-            )
+        # Если номер задан — пробуем вставить автоматически
+        if PHONE:
             try:
-                confirm = await page.wait_for_selector(confirm_sel, timeout=5000, state="visible")
-                await confirm.click()
+                inp = await page.wait_for_selector(
+                    'input[type="tel"], input[name="phone"]',
+                    timeout=5000, state="visible"
+                )
+                await inp.fill(f"+{PHONE}")
+                print(f"Номер вставлен: +{PHONE}")
             except Exception:
-                # Некоторые формы принимают код без кнопки (автосабмит)
-                await code_inp.press("Enter")
+                pass
 
-        except Exception as e:
-            print(f"Поле кода не найдено: {e}")
-            print("Возможно, код принят автоматически или форма изменилась.")
+        print()
+        print("┌─────────────────────────────────────────┐")
+        print("│  Браузер открыт.                        │")
+        print("│                                         │")
+        print("│  1. Введи номер телефона (если пусто)   │")
+        print("│  2. Получи SMS и введи код              │")
+        print("│  3. Дождись загрузки ленты              │")
+        print("│                                         │")
+        print("│  Затем вернись сюда → нажми Enter ↵    │")
+        print("└─────────────────────────────────────────┘")
+        input()
 
-        # ── Шаг 5: ждём редирект на ленту ────────────────────────────────────
-        print("Ожидаем вход...")
-        await page.wait_for_timeout(5000)
-
-        # Если не на ленте — пробуем перейти сами
-        if "feed" not in page.url and "auth" in page.url:
-            await page.goto("https://tenchat.ru/feed", wait_until="domcontentloaded", timeout=15000)
-            await page.wait_for_timeout(3000)
-
-        print(f"URL после входа: {page.url}")
-
-        if "auth" in page.url or "login" in page.url:
-            print("❌ Вход не удался — всё ещё на странице авторизации.")
-            await page.screenshot(path=str(BASE_DIR / "tenchat_debug.png"))
-            print(f"   Скриншот сохранён: tenchat_debug.png")
-            await browser.close()
-            return
-
-        # ── Шаг 6: даём время перехватить токен из API-запросов ──────────────
-        print("Перехватываем токен из API-запросов...")
-        await page.wait_for_timeout(4000)
-
-        # Если токен ещё не перехвачен — пробуем из localStorage
+        # Триггерим API-запросы чтобы перехватить токен
         if not captured["token"]:
             try:
-                token_ls = await page.evaluate("""
-                    () => {
-                        const keys = Object.keys(localStorage);
-                        for (const key of keys) {
-                            const val = localStorage.getItem(key);
-                            try {
-                                const obj = JSON.parse(val);
-                                if (obj && typeof obj === 'object') {
-                                    const t = obj.token || obj.access_token || obj.accessToken || obj.jwt;
-                                    if (t && t.length > 50) return t;
-                                }
-                            } catch(e) {}
-                        }
-                        return null;
-                    }
-                """)
-                if token_ls:
-                    captured["token"] = token_ls
-                    print("✅ Токен найден в localStorage!")
-            except Exception as e:
-                print(f"localStorage: {e}")
+                await page.goto("https://tenchat.ru/feed", wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_timeout(3000)
+            except Exception:
+                pass
 
-        # ── Шаг 7: сохраняем результаты ──────────────────────────────────────
+        # Пробуем достать токен из localStorage
+        if not captured["token"]:
+            try:
+                t = await page.evaluate("""() => {
+                    for (const key of Object.keys(localStorage)) {
+                        const raw = localStorage.getItem(key);
+                        try {
+                            const obj = JSON.parse(raw);
+                            if (obj && typeof obj === 'object') {
+                                const t = obj.token || obj.access_token ||
+                                          obj.accessToken || obj.jwt;
+                                if (t && t.length > 50) return t;
+                            }
+                        } catch(e) {}
+                    }
+                    return null;
+                }""")
+                if t:
+                    captured["token"] = t
+                    print("✅  Токен найден в localStorage!")
+            except Exception:
+                pass
+
+        # Сохраняем
         await context.storage_state(path=str(SESSION_FILE))
-        print(f"\n✅ Сессия сохранена  → {SESSION_FILE}")
+        print(f"\n✅  Сессия сохранена  → {SESSION_FILE}")
 
         if captured["token"]:
             TOKEN_FILE.write_text(
-                json.dumps({"token": captured["token"]}, ensure_ascii=False, indent=2)
+                json.dumps({"token": captured["token"]}, indent=2, ensure_ascii=False)
             )
-            print(f"✅ Токен сохранён    → {TOKEN_FILE}")
+            print(f"✅  Токен сохранён   → {TOKEN_FILE}")
         else:
-            print("⚠️  Токен не перехвачен — бот будет работать через cookies сессии.")
+            print("⚠️   Токен не найден — бот будет работать только через cookies.")
 
         await browser.close()
 
     print()
-    print("=" * 50)
-    print("  Готово! Данные сохранены на сервере.")
-    print("  Бот TenChat готов к работе.")
-    print("=" * 50)
+    print("=" * 52)
+    print("  Готово! Теперь скопируй файлы на сервер:")
+    print()
+    print("  Вариант 1 — scp (рекомендуется):")
+    print("  scp tenchat_session.json tenchat_token.json \\")
+    print("      root@<IP_СЕРВЕРА>:/root/crossposting/")
+    print()
+    print("  Вариант 2 — через git:")
+    print("  git add -f tenchat_session.json tenchat_token.json")
+    print("  git commit -m 'tenchat session'")
+    print("  git push")
+    print("  # на сервере: git pull")
+    print("  # после переноса: git rm --cached tenchat_*.json && git commit")
+    print("=" * 52)
 
 
 if __name__ == "__main__":
-    # Загружаем .env если есть
     try:
         from dotenv import load_dotenv
         load_dotenv()
