@@ -385,22 +385,69 @@ async def get_board_id_by_name(token: str, board_name: str) -> str | None:
 
 
 async def _upload_image_api(image_bytes: bytes, token: str) -> str:
-    resized = resize_for_pinterest(image_bytes)
+    """Загружает изображение в Pinterest API"""
+    import base64
+    # Используем base64 вместо media endpoint (работает в Trial)
+    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+    return image_b64
+
+
+async def _post_pin_api(images_bytes: list, text: str, token: str, board_id: str) -> dict:
+    """Создаёт пин через Pinterest API с base64 изображениями"""
+    import base64
+    adapted = await adapt_pinterest_text(text)
+    
+    # Конвертируем изображения в URL-safe base64 (без переносов строк)
+    images_b64 = []
+    for img in images_bytes[:5]:
+        resized = resize_for_pinterest(img)
+        b64 = base64.b64encode(resized).decode('utf-8').replace('\n', '').replace('\r', '')
+        images_b64.append(b64)
+    
     async with httpx.AsyncClient() as client:
-        reg = await client.post(
-            "https://api.pinterest.com/v5/media",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"media_type": "image"},
-            timeout=15
-        )
-        data = reg.json()
-        await client.post(
-            data["upload_url"],
-            data=data["upload_parameters"],
-            files={"file": ("image.jpg", resized, "image/jpeg")},
-            timeout=45
-        )
-    return data["media_id"]
+        if len(images_b64) == 1:
+            r = await client.post(
+                "https://api.pinterest.com/v5/pins",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={
+                    "board_id": board_id,
+                    "title": adapted["title"][:100],
+                    "description": adapted["description"][:500],
+                    "media_source": {
+                        "source_type": "image_base64",
+                        "content_type": "image/jpeg",
+                        "data": images_b64[0]
+                    }
+                },
+                timeout=30
+            )
+        else:
+            # Карусель через multiple_image_base64
+            items = []
+            for img_b64 in images_b64:
+                items.append({
+                    "content_type": "image/jpeg",
+                    "data": img_b64,
+                    "title": adapted["title"][:100],
+                    "description": adapted["description"][:500]
+                })
+            
+            r = await client.post(
+                "https://api.pinterest.com/v5/pins",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={
+                    "board_id": board_id,
+                    "title": adapted["title"][:100],
+                    "description": adapted["description"][:500],
+                    "media_source": {
+                        "source_type": "multiple_image_base64",
+                        "items": items
+                    }
+                },
+                timeout=30
+            )
+    
+    return r.json()
 
 
 async def _post_pin_api(images_bytes: list, text: str, token: str, board_id: str) -> dict:
@@ -438,26 +485,54 @@ async def _post_pin_api(images_bytes: list, text: str, token: str, board_id: str
 async def post_to_pinterest(image_paths: list, text: str) -> dict:
     """
     Публикует пин или карусель в Pinterest.
-    image_paths — список локальных путей к файлам.
+    
+    Пока недоступно - требуется Production Access.
+    Возвращает информацию для ручной публикации.
     """
     token = await load_token()
+    
+    if not token:
+        return {"status": "error", "error": "Нет токена Pinterest"}
 
-    if token:
-        try:
-            board_id = await get_board_id_by_name(token, PINTEREST_BOARD)
-            if board_id:
-                images_bytes = [open(p, "rb").read() for p in image_paths]
-                result = await _post_pin_api(images_bytes, text, token, board_id)
-                return {"status": "ok", "method": "api", "result": result}
-        except Exception as e:
-            error_msg = str(e)
-            if "Trial access" in error_msg or "403" in error_msg:
-                print("[PINTEREST] API в режиме Trial - необходимо одобрение production access")
-                return {"status": "error", "error": "API недоступен для публикации. Требуется одобрение production access от Pinterest."}
-            print(f"[PINTEREST] API error: {e}, falling back to Playwright")
-
-    # Пробуем Playwright как резервный вариант
     try:
-        return await post_to_pinterest_playwright(image_paths, text)
+        board_id = await get_board_id_by_name(token, PINTEREST_BOARD)
+        if not board_id:
+            return {"status": "error", "error": f"Доска '{PINTEREST_BOARD}' не найдена"}
+        
+        # Сохраняем изображение локально для ручной публикации
+        import base64
+        from datetime import datetime
+        from pathlib import Path
+        
+        save_dir = Path("/root/crossposting/pinterest_pending")
+        save_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Сохраняем все изображения
+        saved_files = []
+        for i, path in enumerate(image_paths):
+            with open(path, "rb") as f:
+                img_data = f.read()
+            
+            filename = f"pin_{timestamp}_{i}.jpg"
+            save_path = save_dir / filename
+            with open(save_path, "wb") as f:
+                f.write(img_data)
+            saved_files.append(str(save_path))
+        
+        # Адаптируем текст
+        adapted = await adapt_pinterest_text(text)
+        
+        return {
+            "status": "pending", 
+            "method": "manual",
+            "message": "Требуется Production Access. Файлы сохранены для ручной публикации.",
+            "board_url": f"https://www.pinterest.com/{os.getenv('PINTEREST_USERNAME')}/",
+            "saved_files": saved_files,
+            "title": adapted["title"],
+            "description": adapted["description"]
+        }
+        
     except Exception as e:
-        return {"status": "error", "error": f"Не удалось опубликовать: {e}"}
+        return {"status": "error", "error": f"Ошибка: {e}"}
