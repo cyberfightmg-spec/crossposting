@@ -8,3 +8,5 @@ instagram_creds/
 tenchat_session.json
 tenchat_token.json
 tenchat_api.json
+_mitm_certs/
+_tenchat_mitm_addon.py
