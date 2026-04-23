@@ -5,3 +5,8 @@ python-dotenv
 Pillow
 playwright
 instagrapi
+aiogram>=3.7
+openai>=1.0
+apscheduler>=3.10
+pytz
+duckduckgo-search>=6.0
