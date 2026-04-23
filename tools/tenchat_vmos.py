@@ -24,7 +24,7 @@ from typing import List, Union
 log = logging.getLogger("crosspost.tenchat_vmos")
 
 VMOS_ADB     = os.getenv("VMOS_ADB", "")          # e.g. "1.2.3.4:5555"
-TENCHAT_PKG  = os.getenv("TENCHAT_PKG", "ru.tenchat.mobile")
+TENCHAT_PKG  = os.getenv("TENCHAT_PKG", "ru.gostinder")  # TenChat = "ГосТиндер"
 
 _BTN_ADD        = "Добавить"
 _BTN_CREATE     = "Создать запись"
