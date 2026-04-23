@@ -1,8 +1,10 @@
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 
-MEMORY_FILE = Path(__file__).parent.parent / "jarvis_memory.json"
+_DATA_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent.parent
+MEMORY_FILE = Path(os.getenv("MEMORY_FILE", str(_DATA_DIR / "jarvis_memory.json")))
 
 DEFAULT_MEMORY = {
     "identity": {

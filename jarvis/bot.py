@@ -3,7 +3,6 @@ import asyncio
 import tempfile
 import logging
 from pathlib import Path
-from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -13,24 +12,18 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 
-from .memory import (
-    load_memory,
-    save_memory,
-    init_memory,
-    update_state,
-    add_task,
-    complete_task,
-    log_day,
-    get_profile_summary,
-)
+from .memory import load_memory, init_memory, update_state, add_task, complete_task, get_profile_summary
 from .prompts import get_system_prompt, MORNING_CHECKIN, EVENING_REVIEW, CONTENT_IDEAS_PROMPT, WEEK_PLAN_PROMPT
-from .trends import get_niche_trends, get_content_trends
+from .trends import get_niche_trends
+from . import rag
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,30 +35,64 @@ _openai: AsyncOpenAI = None
 _conversation: dict[int, list] = {}
 
 
-def _get_allowed_id() -> int:
-    val = os.getenv("JARVIS_USER_ID", "0")
+# ── FSM states ────────────────────────────────────────────────────────────
+
+class JarvisState(StatesGroup):
+    waiting_idea = State()
+    waiting_recall = State()
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+
+def _allowed_id() -> int:
     try:
-        return int(val)
+        return int(os.getenv("JARVIS_USER_ID", "0"))
     except ValueError:
         return 0
 
 
-def _get_history(user_id: int) -> list:
-    if user_id not in _conversation:
-        _conversation[user_id] = []
-    return _conversation[user_id]
+def _is_allowed(uid: int) -> bool:
+    a = _allowed_id()
+    return a == 0 or uid == a
 
 
-def _add_to_history(user_id: int, role: str, content: str):
-    history = _get_history(user_id)
-    history.append({"role": role, "content": content})
-    if len(history) > 30:
-        _conversation[user_id] = history[-30:]
+def _history(uid: int) -> list:
+    if uid not in _conversation:
+        _conversation[uid] = []
+    return _conversation[uid]
 
 
-async def _chat(user_id: int, user_message: str) -> str:
-    _add_to_history(user_id, "user", user_message)
-    messages = [{"role": "system", "content": get_system_prompt()}] + _get_history(user_id)
+def _push(uid: int, role: str, content: str):
+    h = _history(uid)
+    h.append({"role": role, "content": content})
+    if len(h) > 30:
+        _conversation[uid] = h[-30:]
+
+
+def _split(text: str, limit: int = 4000) -> list[str]:
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+
+async def _send(target, text: str):
+    for part in _split(text):
+        await target.answer(part)
+
+
+# ── chat with RAG ─────────────────────────────────────────────────────────
+
+async def _chat(uid: int, user_message: str, auto_save: bool = True) -> str:
+    _push(uid, "user", user_message)
+
+    # Retrieve relevant memories
+    rag_items = await rag.search(_openai, user_message, top_k=4)
+    rag_ctx = rag.format_context(rag_items)
+
+    system = get_system_prompt()
+    if rag_ctx:
+        system = f"{system}\n\n{rag_ctx}"
+
+    messages = [{"role": "system", "content": system}] + _history(uid)
+
     try:
         resp = await _openai.chat.completions.create(
             model="gpt-4o",
@@ -74,46 +101,39 @@ async def _chat(user_id: int, user_message: str) -> str:
             temperature=0.7,
         )
         reply = resp.choices[0].message.content
-        _add_to_history(user_id, "assistant", reply)
+        _push(uid, "assistant", reply)
+
+        if auto_save and len(user_message.strip()) >= rag.MIN_TEXT_LEN:
+            asyncio.create_task(
+                rag.save_entry(
+                    _openai,
+                    f"Слава: {user_message}\nJarvis: {reply}",
+                    source="conversation",
+                )
+            )
+
         return reply
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
         return f"Ошибка OpenAI: {e}"
 
 
-async def _transcribe(voice_file_id: str) -> str:
-    file = await _bot.get_file(voice_file_id)
+async def _transcribe(file_id: str) -> str:
+    f = await _bot.get_file(file_id)
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-        await _bot.download_file(file.file_path, tmp.name)
+        await _bot.download_file(f.file_path, tmp.name)
         tmp_path = tmp.name
     try:
-        with open(tmp_path, "rb") as f:
-            transcript = await _openai.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                language="ru",
+        with open(tmp_path, "rb") as audio:
+            tr = await _openai.audio.transcriptions.create(
+                model="whisper-1", file=audio, language="ru"
             )
-        return transcript.text
+        return tr.text
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def _split_message(text: str, limit: int = 4000) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    parts = []
-    while text:
-        parts.append(text[:limit])
-        text = text[limit:]
-    return parts
-
-
-async def _send(message: Message, text: str):
-    for part in _split_message(text):
-        await message.answer(part)
-
-
-# ── keyboards ──────────────────────────────────────────────────────────────
+# ── keyboards ─────────────────────────────────────────────────────────────
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -134,8 +154,12 @@ def kb_main() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🧠 Профиль", callback_data="profile"),
         ],
         [
+            InlineKeyboardButton(text="💾 Сохранить идею", callback_data="save_idea"),
+            InlineKeyboardButton(text="📚 Мои идеи", callback_data="my_ideas"),
+        ],
+        [
+            InlineKeyboardButton(text="🔍 Найти в памяти", callback_data="recall"),
             InlineKeyboardButton(text="➕ Добавить задачу", callback_data="add_task"),
-            InlineKeyboardButton(text="🗑 Закрыть задачу", callback_data="done_task"),
         ],
     ])
 
@@ -146,20 +170,24 @@ def kb_back() -> InlineKeyboardMarkup:
     ])
 
 
-# ── command handlers ────────────────────────────────────────────────────────
+def kb_cancel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="menu")]
+    ])
+
+
+# ── router ────────────────────────────────────────────────────────────────
 
 router = Router()
 
 
-def _is_allowed(user_id: int) -> bool:
-    allowed = _get_allowed_id()
-    return allowed == 0 or user_id == allowed
-
+# ── commands ──────────────────────────────────────────────────────────────
 
 @router.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     if not _is_allowed(message.from_user.id):
         return
+    await state.clear()
     init_memory()
     await message.answer(
         "Jarvis активирован. Твой персональный оператор онлайн.\n\nЧто делаем?",
@@ -168,18 +196,77 @@ async def cmd_start(message: Message):
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message):
+async def cmd_menu(message: Message, state: FSMContext):
     if not _is_allowed(message.from_user.id):
         return
+    await state.clear()
     await message.answer("Главное меню:", reply_markup=kb_main())
 
 
-# ── callback handlers ───────────────────────────────────────────────────────
+@router.message(Command("task"))
+async def cmd_task(message: Message):
+    if not _is_allowed(message.from_user.id):
+        return
+    text = message.text.removeprefix("/task").strip()
+    if not text:
+        await message.answer("Формат: /task Текст задачи")
+        return
+    add_task(text, "current")
+    await message.answer(f"✅ Задача добавлена:\n{text}", reply_markup=kb_back())
+
+
+@router.message(Command("done"))
+async def cmd_done(message: Message):
+    if not _is_allowed(message.from_user.id):
+        return
+    text = message.text.removeprefix("/done").strip()
+    if not text:
+        await message.answer("Формат: /done Текст задачи")
+        return
+    complete_task(text)
+    await message.answer(f"✔️ Задача закрыта:\n{text}", reply_markup=kb_back())
+
+
+@router.message(Command("idea"))
+async def cmd_idea(message: Message):
+    if not _is_allowed(message.from_user.id):
+        return
+    text = message.text.removeprefix("/idea").strip()
+    if not text:
+        await message.answer("Формат: /idea Текст идеи")
+        return
+    ok = await rag.save_entry(_openai, text, source="idea")
+    if ok:
+        await message.answer(f"💾 Идея сохранена в базу:\n_{text}_", parse_mode="Markdown", reply_markup=kb_back())
+    else:
+        await message.answer("Ошибка сохранения.", reply_markup=kb_back())
+
+
+@router.message(Command("recall"))
+async def cmd_recall(message: Message):
+    if not _is_allowed(message.from_user.id):
+        return
+    query = message.text.removeprefix("/recall").strip()
+    if not query:
+        await message.answer("Формат: /recall поисковый запрос")
+        return
+    items = await rag.search(_openai, query, top_k=5)
+    if not items:
+        await message.answer("Ничего не найдено в памяти.", reply_markup=kb_back())
+        return
+    lines = [f"🔍 По запросу: *{query}*\n"]
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. [{item['date']}]\n{item['text'][:300]}")
+    await message.answer("\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_back())
+
+
+# ── callbacks ─────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "menu")
-async def cb_menu(call: CallbackQuery):
+async def cb_menu(call: CallbackQuery, state: FSMContext):
     if not _is_allowed(call.from_user.id):
         return
+    await state.clear()
     await call.message.edit_text("Главное меню:", reply_markup=kb_main())
     await call.answer()
 
@@ -209,17 +296,14 @@ async def cb_goals(call: CallbackQuery):
     g = memory["goals"]
     e = memory["execution"]
     weekly = "\n".join(f"  • {t}" for t in g.get("weekly", [])) or "  не заданы"
-    quarterly = "\n".join(f"  • {t}" for t in g.get("quarterly", [])) or "  не заданы"
     priorities = "\n".join(f"  • {t}" for t in e.get("priorities", [])) or "  не заданы"
     text = (
         f"🎯 Цели\n\n"
         f"Главная: {g['primary']}\n\n"
         f"Выход в ноль: {g['monthly_breakeven_rub']:,}₽/мес\n"
         f"Комфорт: {g['monthly_comfort_rub']:,}₽/мес\n\n"
-        f"Контекст: {g['family_context']}\n\n"
-        f"Приоритеты сейчас:\n{priorities}\n\n"
-        f"На неделю:\n{weekly}\n\n"
-        f"На квартал:\n{quarterly}"
+        f"Приоритеты:\n{priorities}\n\n"
+        f"На неделю:\n{weekly}"
     )
     await call.message.edit_text(text, reply_markup=kb_back())
 
@@ -233,10 +317,12 @@ async def cb_tasks(call: CallbackQuery):
     ex = memory["execution"]
     current = ex.get("current_tasks", [])
     pending = ex.get("pending_tasks", [])
-    c_text = "\n".join(f"  • {t}" for t in current) if current else "  — пусто"
-    p_text = "\n".join(f"  • {t}" for t in pending) if pending else "  — пусто"
-    text = f"✅ Задачи\n\nТекущие:\n{c_text}\n\nЗависшие:\n{p_text}"
-    await call.message.edit_text(text, reply_markup=kb_back())
+    c = "\n".join(f"  • {t}" for t in current) if current else "  — пусто"
+    p = "\n".join(f"  • {t}" for t in pending) if pending else "  — пусто"
+    await call.message.edit_text(
+        f"✅ Задачи\n\nТекущие:\n{c}\n\nЗависшие:\n{p}",
+        reply_markup=kb_back()
+    )
 
 
 @router.callback_query(F.data == "trends")
@@ -244,14 +330,14 @@ async def cb_trends(call: CallbackQuery):
     if not _is_allowed(call.from_user.id):
         return
     await call.answer("Ищу тренды...")
-    await call.message.edit_text("📈 Ищу тренды в нише... (10-20 секунд)")
+    await call.message.edit_text("📈 Ищу тренды в нише... подожди 15-20 сек")
     trends_raw = get_niche_trends()
     summary = await _chat(
         call.from_user.id,
-        f"Вот данные по трендам:\n\n{trends_raw}\n\n"
-        f"Дай краткую выжимку: что актуально прямо сейчас, как это использовать в офферах и контенте Славы."
+        f"Данные по трендам:\n\n{trends_raw}\n\nКраткая выжимка: что актуально, как использовать в офферах и контенте.",
+        auto_save=False,
     )
-    for part in _split_message(f"📈 Тренды в нише\n\n{summary}"):
+    for part in _split(f"📈 Тренды в нише\n\n{summary}"):
         await call.message.answer(part)
     await call.message.answer("Главное меню:", reply_markup=kb_main())
 
@@ -260,10 +346,10 @@ async def cb_trends(call: CallbackQuery):
 async def cb_content(call: CallbackQuery):
     if not _is_allowed(call.from_user.id):
         return
-    await call.answer("Генерирую идеи...")
+    await call.answer("Генерирую...")
     await call.message.edit_text("💡 Генерирую идеи для контента...")
-    result = await _chat(call.from_user.id, CONTENT_IDEAS_PROMPT)
-    for part in _split_message(f"💡 Идеи для контента\n\n{result}"):
+    result = await _chat(call.from_user.id, CONTENT_IDEAS_PROMPT, auto_save=False)
+    for part in _split(f"💡 Идеи для контента\n\n{result}"):
         await call.message.answer(part)
     await call.message.answer("Главное меню:", reply_markup=kb_main())
 
@@ -274,8 +360,8 @@ async def cb_week_plan(call: CallbackQuery):
         return
     await call.answer("Составляю план...")
     await call.message.edit_text("📅 Составляю план на неделю...")
-    result = await _chat(call.from_user.id, WEEK_PLAN_PROMPT)
-    for part in _split_message(f"📅 План на неделю\n\n{result}"):
+    result = await _chat(call.from_user.id, WEEK_PLAN_PROMPT, auto_save=False)
+    for part in _split(f"📅 План на неделю\n\n{result}"):
         await call.message.answer(part)
     await call.message.answer("Главное меню:", reply_markup=kb_main())
 
@@ -287,22 +373,63 @@ async def cb_profile(call: CallbackQuery):
     await call.answer("Загружаю...")
     memory = load_memory()
     identity = memory["identity"]
-    patterns = memory["patterns"]
     state = memory["state"]
+    patterns = memory["patterns"]
     text = (
         f"🧠 Профиль\n\n"
-        f"Имя: {identity['name']}, {identity['age']} лет\n"
-        f"Локация: {identity['location']}\n\n"
-        f"Навыки: {', '.join(identity['skills'])}\n"
-        f"Инструменты: {', '.join(identity['tools'])}\n\n"
-        f"Текущее состояние:\n"
+        f"{identity['name']}, {identity['age']} лет, {identity['location']}\n\n"
+        f"Навыки: {', '.join(identity['skills'])}\n\n"
+        f"Состояние:\n"
         f"  Стресс: {state.get('stress') or '—'}/10\n"
         f"  Энергия: {state.get('energy') or '—'}/10\n"
         f"  Настроение: {state.get('mood') or '—'}/10\n\n"
-        f"Паттерны-блокеры:\n" +
-        "\n".join(f"  ⚠️ {b}" for b in patterns.get("blockers", []))
+        f"Паттерны:\n" + "\n".join(f"  ⚠️ {b}" for b in patterns.get("blockers", []))
     )
     await call.message.edit_text(text, reply_markup=kb_back())
+
+
+@router.callback_query(F.data == "save_idea")
+async def cb_save_idea(call: CallbackQuery, state: FSMContext):
+    if not _is_allowed(call.from_user.id):
+        return
+    await state.set_state(JarvisState.waiting_idea)
+    await call.message.edit_text(
+        "💾 Напиши идею — я сохраню её в базу.\n\n"
+        "Можешь написать текстом или отправить голосовое.",
+        reply_markup=kb_cancel(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "my_ideas")
+async def cb_my_ideas(call: CallbackQuery):
+    if not _is_allowed(call.from_user.id):
+        return
+    await call.answer("Загружаю...")
+    ideas = rag.get_ideas(limit=15)
+    if not ideas:
+        await call.message.edit_text(
+            "📚 Идей пока нет.\n\nНажми 💾 Сохранить идею или используй /idea текст",
+            reply_markup=kb_back()
+        )
+        return
+    lines = ["📚 Сохранённые идеи:\n"]
+    for i, idea in enumerate(ideas, 1):
+        tags = f" [{', '.join(idea['tags'])}]" if idea.get("tags") else ""
+        lines.append(f"{i}. [{idea['date']}]{tags}\n{idea['text'][:250]}")
+    await call.message.edit_text("\n\n".join(lines), reply_markup=kb_back())
+
+
+@router.callback_query(F.data == "recall")
+async def cb_recall(call: CallbackQuery, state: FSMContext):
+    if not _is_allowed(call.from_user.id):
+        return
+    await state.set_state(JarvisState.waiting_recall)
+    await call.message.edit_text(
+        "🔍 Что ищем в памяти? Напиши запрос.",
+        reply_markup=kb_cancel(),
+    )
+    await call.answer()
 
 
 @router.callback_query(F.data == "add_task")
@@ -310,67 +437,78 @@ async def cb_add_task(call: CallbackQuery):
     if not _is_allowed(call.from_user.id):
         return
     await call.message.edit_text(
-        "Напиши задачу текстом — я добавлю её в список.\n\nФормат: /task Текст задачи",
+        "Добавить задачу:\n/task Текст задачи",
         reply_markup=kb_back()
     )
     await call.answer()
 
 
-@router.callback_query(F.data == "done_task")
-async def cb_done_task(call: CallbackQuery):
-    if not _is_allowed(call.from_user.id):
-        return
-    await call.message.edit_text(
-        "Напиши какую задачу закрыть.\n\nФормат: /done Текст задачи",
-        reply_markup=kb_back()
-    )
-    await call.answer()
+# ── FSM handlers ──────────────────────────────────────────────────────────
 
-
-# ── task commands ────────────────────────────────────────────────────────────
-
-@router.message(Command("task"))
-async def cmd_task(message: Message):
+@router.message(JarvisState.waiting_idea, F.voice)
+async def fsm_idea_voice(message: Message, state: FSMContext):
     if not _is_allowed(message.from_user.id):
         return
-    task_text = message.text.removeprefix("/task").strip()
-    if not task_text:
-        await message.answer("Укажи задачу: /task Текст задачи")
-        return
-    add_task(task_text, "current")
-    await message.answer(f"✅ Задача добавлена:\n{task_text}", reply_markup=kb_back())
+    processing = await message.answer("🎙 Слушаю...")
+    text = await _transcribe(message.voice.file_id)
+    await processing.edit_text(f"🎙 _{text}_", parse_mode="Markdown")
+    await _save_idea_text(message, state, text)
 
 
-@router.message(Command("done"))
-async def cmd_done(message: Message):
+@router.message(JarvisState.waiting_idea, F.text & ~F.text.startswith("/"))
+async def fsm_idea_text(message: Message, state: FSMContext):
     if not _is_allowed(message.from_user.id):
         return
-    task_text = message.text.removeprefix("/done").strip()
-    if not task_text:
-        await message.answer("Укажи задачу: /done Текст задачи")
+    await _save_idea_text(message, state, message.text)
+
+
+async def _save_idea_text(message: Message, state: FSMContext, text: str):
+    await state.clear()
+    ok = await rag.save_entry(_openai, text, source="idea")
+    if ok:
+        await message.answer(
+            f"💾 Идея сохранена:\n_{text[:400]}_",
+            parse_mode="Markdown",
+            reply_markup=kb_main(),
+        )
+    else:
+        await message.answer("Ошибка сохранения.", reply_markup=kb_main())
+
+
+@router.message(JarvisState.waiting_recall, F.text & ~F.text.startswith("/"))
+async def fsm_recall(message: Message, state: FSMContext):
+    if not _is_allowed(message.from_user.id):
         return
-    complete_task(task_text)
-    await message.answer(f"✔️ Задача закрыта:\n{task_text}", reply_markup=kb_back())
+    await state.clear()
+    query = message.text
+    items = await rag.search(_openai, query, top_k=5)
+    if not items:
+        await message.answer("По запросу ничего не найдено.", reply_markup=kb_main())
+        return
+    lines = [f"🔍 *{query}*\n"]
+    for i, item in enumerate(items, 1):
+        lines.append(f"{i}. [{item['date']}]\n{item['text'][:350]}")
+    await message.answer("\n\n".join(lines), parse_mode="Markdown", reply_markup=kb_main())
 
 
-# ── voice ────────────────────────────────────────────────────────────────────
+# ── voice (normal mode) ───────────────────────────────────────────────────
 
 @router.message(F.voice)
 async def handle_voice(message: Message):
     if not _is_allowed(message.from_user.id):
         return
-    processing_msg = await message.answer("🎙 Слушаю...")
+    processing = await message.answer("🎙 Слушаю...")
     try:
         text = await _transcribe(message.voice.file_id)
-        await processing_msg.edit_text(f"🎙 _{text}_", parse_mode="Markdown")
+        await processing.edit_text(f"🎙 _{text}_", parse_mode="Markdown")
         response = await _chat(message.from_user.id, text)
         await _send(message, response)
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await processing_msg.edit_text(f"Ошибка обработки голоса: {e}")
+        await processing.edit_text(f"Ошибка: {e}")
 
 
-# ── text ─────────────────────────────────────────────────────────────────────
+# ── text (normal mode) ────────────────────────────────────────────────────
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message):
@@ -380,21 +518,21 @@ async def handle_text(message: Message):
     await _send(message, response)
 
 
-# ── scheduler ────────────────────────────────────────────────────────────────
+# ── scheduler ─────────────────────────────────────────────────────────────
 
 async def _send_morning():
-    uid = _get_allowed_id()
+    uid = _allowed_id()
     if uid:
         await _bot.send_message(uid, MORNING_CHECKIN, reply_markup=kb_back())
 
 
 async def _send_evening():
-    uid = _get_allowed_id()
+    uid = _allowed_id()
     if uid:
         await _bot.send_message(uid, EVENING_REVIEW, reply_markup=kb_back())
 
 
-# ── entry point ───────────────────────────────────────────────────────────────
+# ── entry point ───────────────────────────────────────────────────────────
 
 async def run():
     global _bot, _openai
