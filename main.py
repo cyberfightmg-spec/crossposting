@@ -35,11 +35,34 @@ from tools.instagram_media import (
     cleanup_dated_folder,
 )
 from tools.tenchat import (
-    post_text_tenchat,
-    post_photo_tenchat,
-    post_video_tenchat,
+    post_text_tenchat as _post_text_tenchat_playwright,
+    post_photo_tenchat as _post_photo_tenchat_playwright,
+    post_video_tenchat as _post_video_tenchat_playwright,
     has_credentials as tenchat_configured,
 )
+from tools.tenchat_vmos import (
+    post_text_tenchat_vmos,
+    post_photo_tenchat_vmos,
+    post_video_tenchat_vmos,
+)
+
+# Use VMOS virtual phone if ADB address is configured, else fall back to Playwright
+_VMOS_ADB = os.getenv("VMOS_ADB", "")
+
+async def post_text_tenchat(text: str, title: str = "") -> dict:
+    if _VMOS_ADB:
+        return await post_text_tenchat_vmos(text, title)
+    return await _post_text_tenchat_playwright(text, title)
+
+async def post_photo_tenchat(image_paths, caption: str = "", title: str = "") -> dict:
+    if _VMOS_ADB:
+        return await post_photo_tenchat_vmos(image_paths, caption, title)
+    return await _post_photo_tenchat_playwright(image_paths, caption, title)
+
+async def post_video_tenchat(video_bytes: bytes, caption: str = "", title: str = "") -> dict:
+    if _VMOS_ADB:
+        return await post_video_tenchat_vmos(video_bytes, caption, title)
+    return await _post_video_tenchat_playwright(video_bytes, caption, title)
 
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +78,7 @@ ENABLED_PLATFORMS = {
     "instagram": os.getenv("INSTAGRAM_ENABLED", "false").lower() == "true",
     "pinterest": os.getenv("PINTEREST_ENABLED", "false").lower() == "true",
     "linkedin": os.getenv("LINKEDIN_ENABLED", "false").lower() == "true",
-    "tenchat": os.getenv("TENCHAT_ENABLED", "false").lower() == "true" and tenchat_configured(),
+    "tenchat": os.getenv("TENCHAT_ENABLED", "false").lower() == "true" and (bool(_VMOS_ADB) or tenchat_configured()),
 }
 
 
