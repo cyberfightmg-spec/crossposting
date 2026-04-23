@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>VMOS Cloud - TenChat</title>
+  <meta charset="utf-8">
+  <style>
+    body { background: #1a1a1a; color: #fff; font-family: Arial; padding: 20px; text-align: center; }
+    #phoneBox { width: 360px; height: 640px; margin: 20px auto; border: 3px solid #4CAF50; border-radius: 20px; overflow: hidden; background: #000; }
+    button { padding: 10px 20px; margin: 5px; font-size: 14px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 5px; }
+    button.stop { background: #f44336; }
+    .log { width: 90%; height: 100px; background: #222; color: #0f0; font-family: monospace; font-size: 12px; padding: 10px; margin: 20px auto; overflow: auto; text-align: left; }
+    #status { padding: 10px; background: #333; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <h1>VMOS Cloud - TenChat Control</h1>
+  <div id="status">Connecting...</div>
+  <div id="phoneBox"></div>
+  <div>
+    <button onclick="connect()">Connect</button>
+    <button onclick="doPost()">Create Post</button>
+  </div>
+  <div class="log" id="log"></div>
+
+  <script type="module">
+    import { ArmcloudEngine } from 'armcloud-rtc';
+    
+    const PAD_CODE = 'AC32010940924';
+    let armCloud = null;
+    
+    function log(msg) {
+      document.getElementById('log').innerHTML += '<div>' + msg + '</div>';
+    }
+    
+    window.connect = async function() {
+      document.getElementById('status').textContent = 'Getting token...';
+      
+      // Get token from Python
+      const response = await fetch('/api/token');
+      const { token } = await response.json();
+      
+      log('Token: ' + token.substring(0, 20) + '...');
+      
+      armCloud = new ArmcloudEngine({
+        baseUrl: 'https://openapi-hk.armcloud.net',
+        token: token,
+        deviceInfo: {
+          padCode: PAD_CODE,
+          userId: 'web-' + Date.now(),
+          videoStream: { resolution: 12, frameRate: 15, bitrate: 3 },
+          mediaType: 3,
+          rotateType: 0,
+          keyboard: 'pad'
+        },
+        viewId: 'phoneBox',
+        callbacks: {
+          onInit: ({ code, msg }) => {
+            log('Init: ' + code + ' ' + msg);
+            if (code === 0) armCloud.start();
+          },
+          onConnectSuccess: () => {
+            document.getElementById('status').textContent = 'Connected!';
+            log('Connected!');
+          },
+          onConnectFail: ({ code, msg }) => {
+            log('Failed: ' + code + ' ' + msg);
+          },
+          onRenderedFirstFrame: () => {
+            log('First frame!');
+          }
+        }
+      });
+    };
+    
+    window.doPost = function() {
+      log('Create post clicked - use mouse on screen');
+    };
+  </script>
+</body>
+</html>
