@@ -12,3 +12,8 @@ tenchat_session.json
 pinterest_token.json
 *.pem
 *.key
+
+# Jarvis personal data
+jarvis_memory.json
+jarvis_rag.json
+data/
