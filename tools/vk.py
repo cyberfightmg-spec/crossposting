@@ -96,7 +96,7 @@ def add_watermark_to_video(video_bytes: bytes, watermark_text: str = VIDEO_WATER
         )
         
         cmd = [
-            "ffmpeg", "-y",
+            "/usr/bin/ffmpeg", "-y",
             "-i", tmp_in_path,
             "-vf", filter_cmd,
             "-c:v", "libx264",
@@ -237,8 +237,30 @@ async def post_photo_vk(images: List[Union[str, bytes]], caption: str, carousel:
         return r.json()
 
 
+def limit_hashtags(text: str, max_tags: int = 3) -> str:
+    """Ограничивает количество хэштегов до max_tags"""
+    import re
+    # Находим все хэштеги
+    hashtags = re.findall(r'#[а-яёa-zA-Z0-9_]+', text)
+    if len(hashtags) <= max_tags:
+        return text
+    # Оставляем только первые max_tags хэштегов
+    keep_tags = hashtags[:max_tags]
+    # Удаляем все хэштеги из текста и добавляем нужные
+    text_no_tags = re.sub(r'#[а-яёa-zA-Z0-9_]+', '', text)
+    # Чистим лишние пробелы
+    text_no_tags = re.sub(r'\n{3,}', '\n\n', text_no_tags)
+    text_no_tags = re.sub(r' {2,}', ' ', text_no_tags)
+    # Добавляем хэштеги в конце
+    tags_str = ' '.join(keep_tags)
+    return text_no_tags.strip() + '\n\n' + tags_str
+
+
 async def post_video_vk(video_bytes: bytes, caption: str) -> dict:
-    """Загружает видео в VK и публикует пост со ссылкой на него."""
+    """Загружает видео в VK Клипы и публикует на стене."""
+    # Ограничиваем хэштеги до 3 для видео
+    caption = limit_hashtags(caption, max_tags=3)
+    
     print(f"[VIDEO] Adding watermark to video ({len(video_bytes)} bytes)...")
     video_bytes = add_watermark_to_video(video_bytes)
     print(f"[VIDEO] Watermark added, new size: {len(video_bytes)} bytes")
@@ -246,12 +268,14 @@ async def post_video_vk(video_bytes: bytes, caption: str) -> dict:
     group_id = VK_OWNER_ID.lstrip("-")
     async with httpx.AsyncClient() as client:
         # 1. Получаем URL для загрузки
+        # wall_post=1 публикует на стене и в ленте клипов
         r = await client.post(f"{VK_API}/video.save", data={
             "access_token": VK_TOKEN,
             "group_id": group_id,
             "name": caption[:100] if caption else "Video",
             "description": caption[:5000] if caption else "",
             "from_group": 1,
+            "wall_post": 1,  # Опубликовать на стене + в клипы
             "v": VK_V
         }, timeout=15)
         data = r.json()
@@ -281,6 +305,55 @@ async def post_video_vk(video_bytes: bytes, caption: str) -> dict:
         return wall_r.json()
 
 
+def prepare_image_for_story(image_bytes: bytes) -> bytes:
+    """Подготавливает изображение для сторис VK (9:16, 1080x1920) без зума"""
+    from PIL import Image
+    import io
+    
+    # Открываем оригинал
+    img = Image.open(io.BytesIO(image_bytes))
+    orig_width, orig_height = img.size
+    
+    # Целевой размер для сторис VK (9:16)
+    target_width = 1080
+    target_height = 1920
+    target_ratio = target_width / target_height
+    
+    # Вычисляем размеры с сохранением пропорций
+    orig_ratio = orig_width / orig_height
+    
+    if orig_ratio > target_ratio:
+        # Изображение шире, чем 9:16 - ограничиваем по ширине
+        new_width = target_width
+        new_height = int(target_width / orig_ratio)
+    else:
+        # Изображение выше или точно 9:16 - ограничиваем по высоте
+        new_height = target_height
+        new_width = int(target_height * orig_ratio)
+    
+    # Масштабируем с сохранением пропорций
+    img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    # Создаем холст 9:16 с черным фоном (или можно сделать blur)
+    canvas = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+    
+    # Центрируем изображение на холсте
+    x_offset = (target_width - new_width) // 2
+    y_offset = (target_height - new_height) // 2
+    
+    # Вставляем изображение
+    if img_resized.mode == 'RGBA':
+        canvas.paste(img_resized, (x_offset, y_offset), img_resized)
+    else:
+        canvas.paste(img_resized, (x_offset, y_offset))
+    
+    # Сохраняем
+    output = io.BytesIO()
+    canvas.save(output, format='JPEG', quality=95)
+    output.seek(0)
+    return output.read()
+
+
 async def post_story_vk(image_bytes: bytes, caption: str = "") -> dict:
     """Публикует сторис в группу VK с водяным знаком"""
     import sys
@@ -302,7 +375,12 @@ async def post_story_vk(image_bytes: bytes, caption: str = "") -> dict:
     print(f"[STORY] Using owner_id: {story_owner_id} (group_id: {group_id})")
     print(f"[STORY] Using USER token for story API")
     
-    watermarked = add_watermark_to_image(image_bytes)
+    # Подготавливаем изображение для сторис (9:16)
+    story_image = prepare_image_for_story(image_bytes)
+    print(f"[STORY] Image prepared for story, size: {len(story_image)} bytes")
+    
+    # Добавляем водяной знак
+    watermarked = add_watermark_to_image(story_image)
     print(f"[STORY] Watermark added, size: {len(watermarked)} bytes")
     
     async with httpx.AsyncClient() as client:

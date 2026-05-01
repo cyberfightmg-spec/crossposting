@@ -4,3 +4,9 @@ pinterest_creds/
 *.log
 last_offset.json
 instagram_creds/
+__pycache__/
+*/__pycache__/
+*.pyc
+*.pyo
+pinterest_pending/
+tenchat_debug.png

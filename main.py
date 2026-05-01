@@ -21,6 +21,7 @@ from tools.dzen import post_dzen
 from tools.pinterest import post_to_pinterest, _refresh_access_token
 from tools.wordstat import get_keywords
 from tools.ai_adapter import adapt_vk, adapt_dzen, adapt_youtube
+from tools.nata_adapter import adapt_content, adapt_content_max
 from tools.carousel import process_carousel, cleanup_carousel
 from tools.instagram import post_to_instagram, post_reel_instagram
 from tools.instagram_graph import post_photo as ig_post_photo
@@ -34,6 +35,19 @@ from tools.instagram_media import (
     save_video_with_cover,
     cleanup_dated_folder,
 )
+from tools.okru import (
+    is_configured as okru_configured,
+    post_ok_text,
+    post_ok_photo,
+    get_ok_groups,
+)
+from tools.max_publisher import (
+    is_configured as max_configured,
+    post_text as max_post_text,
+    post_photo as max_post_photo,
+    post_photos as max_post_photos,
+    post_video as max_post_video,
+)
 
 
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,10 +60,12 @@ mcp = FastMCP("crosspost-server")
 # Enable/disable platforms based on .env flags
 ENABLED_PLATFORMS = {
     "vk": os.getenv("VK_ENABLED", "true").lower() == "true",
-    "dzen": os.getenv("DZEN_ENABLED", "true").lower() == "true",
+    "dzen": os.getenv("DZEN_ENABLED", "false").lower() == "true",
     "instagram": os.getenv("INSTAGRAM_ENABLED", "false").lower() == "true",
     "pinterest": os.getenv("PINTEREST_ENABLED", "false").lower() == "true",
     "linkedin": os.getenv("LINKEDIN_ENABLED", "false").lower() == "true",
+    "okru": os.getenv("OKRU_ENABLED", "false").lower() == "true",
+    "max": os.getenv("MAX_ENABLED", "false").lower() == "true",
 }
 
 
@@ -106,22 +122,46 @@ async def send_crosspost_notification(channel_post: dict, result: dict) -> None:
     platforms = result.get("platforms", {})
     platform_names = {
         "vk": "VK",
+        "vk_story": "VK Stories",
         "instagram": "Instagram",
         "pinterest": "Pinterest",
         "dzen": "Дзен",
         "youtube": "YouTube",
+        "okru": "ОК",
+        "max": "Max",
     }
     
-    for platform, status in platforms.items():
+    # Собираем платформы в группы
+    active_platforms = []  # Включенные и обработанные
+    disabled_platforms = []  # Отключенные в .env
+    
+    for platform, enabled in ENABLED_PLATFORMS.items():
         name = platform_names.get(platform, platform.capitalize())
-        if status == "ok":
-            msg += f"✅ {name:<12} ({publish_time})\n"
+        status = platforms.get(platform, "disabled" if not enabled else "not_processed")
+        
+        if not enabled:
+            disabled_platforms.append((name, "disabled"))
+        elif status == "ok":
+            active_platforms.append((name, "ok", publish_time))
+        elif status == "error":
+            active_platforms.append((name, "error", None))
+        elif status == "logged":
+            active_platforms.append((name, "logged", None))
         elif status == "disabled":
-            msg += f"⏸ {name:<12} (отключено)\n"
+            disabled_platforms.append((name, "disabled"))
+    
+    # Сначала выводим активные
+    for name, status, time in active_platforms:
+        if status == "ok":
+            msg += f"✅ {name:<12} ({time})\n"
         elif status == "error":
             msg += f"❌ {name:<12} (ошибка)\n"
         elif status == "logged":
             msg += f"📝 {name:<12} (залогировано)\n"
+    
+    # Затем отключенные
+    for name, status in disabled_platforms:
+        msg += f"⏸ {name:<12} (отключено)\n"
     
     if result.get("errors"):
         msg += f"\nОшибки: {result['errors']}"
@@ -249,7 +289,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                adapted = await adapt_vk(text)
+                adapted = await adapt_content(text)
                 vk_result = await post_text_vk(adapted)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
             except Exception as e:
@@ -276,12 +316,48 @@ async def _do_crosspost(channel_post: dict) -> dict:
             except Exception as e:
                 result["errors"].append(f"youtube: {str(e)}")
 
-        await asyncio.gather(run_vk(), run_dzen(), run_youtube())
+        async def run_okru():
+            if not ENABLED_PLATFORMS["okru"]:
+                result["platforms"]["okru"] = "disabled"
+                return
+            if not okru_configured():
+                result["platforms"]["okru"] = "error"
+                result["errors"].append("okru: not configured")
+                return
+            try:
+                okru_result = await post_ok_text(text)
+                result["platforms"]["okru"] = "ok" if not okru_result.get("error") else "error"
+                if okru_result.get("error"):
+                    result["errors"].append(f"okru: {okru_result.get('error')}")
+            except Exception as e:
+                result["platforms"]["okru"] = "error"
+                result["errors"].append(f"okru: {str(e)}")
+
+        async def run_max():
+            if not ENABLED_PLATFORMS["max"]:
+                result["platforms"]["max"] = "disabled"
+                return
+            if not max_configured():
+                result["platforms"]["max"] = "error"
+                result["errors"].append("max: not configured")
+                return
+            try:
+                entities = channel_post.get("entities", [])
+                max_result = await max_post_text(text, entities)
+                result["platforms"]["max"] = "ok" if not max_result.get("error") else "error"
+                if max_result.get("error"):
+                    result["errors"].append(f"max: {max_result.get('error')}")
+            except Exception as e:
+                result["platforms"]["max"] = "error"
+                result["errors"].append(f"max: {str(e)}")
+
+        await asyncio.gather(run_vk(), run_dzen(), run_youtube(), run_okru(), run_max())
 
     elif content_type == "SLIDES":
         file_ids = [p["file_id"] for p in photos]
         caption = channel_post.get("caption", "")
-        adapted_caption = await adapt_vk(caption) if caption else ""
+        adapted_caption_vk = await adapt_content(caption) if caption else ""
+        adapted_caption_max = await adapt_content_max(caption) if caption else ""
         print(f"[DEBUG] SLIDES: {len(file_ids)} photos, {len(set(file_ids))} unique file_ids")
 
         carousel = await process_carousel(file_ids)
@@ -291,7 +367,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption or caption, carousel=True)
+                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption_vk or caption, carousel=True)
                 if vk_result.get("response"):
                     result["platforms"]["vk"] = "ok"
                 else:
@@ -355,7 +431,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 return
             try:
                 photo_bytes = open(carousel["local_paths"][0], "rb").read()
-                story_result = await post_story_vk(photo_bytes, adapted_caption or caption)
+                story_result = await post_story_vk(photo_bytes, adapted_caption_vk or caption)
                 result["platforms"]["vk_story"] = "ok" if story_result.get("response", {}).get("count", 0) > 0 else "error"
                 if story_result.get("response", {}).get("count", 0) == 0:
                     result["errors"].append(f"vk_story: {story_result.get('error', 'no stories saved')}")
@@ -364,14 +440,63 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["errors"].append(f"vk_story: {str(e)}")
 
         await asyncio.gather(run_vk(), run_pinterest(), run_dzen(), run_instagram(), run_vk_story())
+        
+        async def run_okru_slides():
+            if not ENABLED_PLATFORMS["okru"]:
+                result["platforms"]["okru"] = "disabled"
+                return
+            if not okru_configured():
+                result["platforms"]["okru"] = "error"
+                result["errors"].append("okru: not configured")
+                return
+            try:
+                okru_result = await post_ok_photo(caption, carousel["local_paths"])
+                result["platforms"]["okru"] = "ok" if not okru_result.get("error") else "error"
+                if okru_result.get("error"):
+                    result["errors"].append(f"okru: {okru_result.get('error')}")
+            except Exception as e:
+                result["platforms"]["okru"] = "error"
+                result["errors"].append(f"okru: {str(e)}")
+
+        async def run_max_slides():
+            if not ENABLED_PLATFORMS["max"]:
+                result["platforms"]["max"] = "disabled"
+                return
+            if not max_configured():
+                result["platforms"]["max"] = "error"
+                result["errors"].append("max: not configured")
+                return
+            try:
+                # Читаем байты из локальных файлов
+                photos_bytes = []
+                for path in carousel["local_paths"][:10]:  # Max limit if any
+                    with open(path, "rb") as f:
+                        photos_bytes.append(f.read())
+                
+                caption_entities = channel_post.get("caption_entities", [])
+                max_results = await max_post_photos(photos_bytes, adapted_caption_max, caption_entities)
+                
+                # Проверяем результаты
+                all_ok = all(not r.get("error") for r in max_results)
+                result["platforms"]["max"] = "ok" if all_ok else "error"
+                if not all_ok:
+                    errors = [r.get("error") for r in max_results if r.get("error")]
+                    result["errors"].append(f"max: {errors}")
+            except Exception as e:
+                result["platforms"]["max"] = "error"
+                result["errors"].append(f"max: {str(e)}")
+        
+        await run_okru_slides()
+        await run_max_slides()
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "PHOTO":
         file_id = channel_post["photo"][-1]["file_id"]
         caption = channel_post.get("caption", "")
         print(f"[ADAPT] Original caption: {caption[:100]}...")
-        adapted_caption = await adapt_vk(caption) if caption else ""
-        print(f"[ADAPT] Adapted caption: {adapted_caption[:100]}...")
+        adapted_caption_vk = await adapt_content(caption) if caption else ""
+        adapted_caption_max = await adapt_content_max(caption) if caption else ""
+        print(f"[ADAPT] Adapted caption: {adapted_caption_vk[:100]}...")
 
         carousel = await process_carousel([file_id])
 
@@ -380,7 +505,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption or caption)
+                vk_result = await post_photo_vk(carousel["local_paths"], adapted_caption_vk or caption)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
             except Exception as e:
                 result["platforms"]["vk"] = "error"
@@ -428,7 +553,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 return
             try:
                 photo_bytes = open(carousel["local_paths"][0], "rb").read()
-                story_result = await post_story_vk(photo_bytes, adapted_caption or caption)
+                story_result = await post_story_vk(photo_bytes, adapted_caption_vk or caption)
                 result["platforms"]["vk_story"] = "ok" if story_result.get("response", {}).get("count", 0) > 0 else "error"
                 if story_result.get("response", {}).get("count", 0) == 0:
                     result["errors"].append(f"vk_story: {story_result.get('error', 'no stories saved')}")
@@ -437,14 +562,65 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["errors"].append(f"vk_story: {str(e)}")
 
         await asyncio.gather(run_vk(), run_pinterest(), run_instagram(), run_vk_story())
+        
+        async def run_okru_photo():
+            if not ENABLED_PLATFORMS["okru"]:
+                result["platforms"]["okru"] = "disabled"
+                return
+            if not okru_configured():
+                result["platforms"]["okru"] = "error"
+                result["errors"].append("okru: not configured")
+                return
+            try:
+                okru_result = await post_ok_photo(caption, carousel["local_paths"])
+                result["platforms"]["okru"] = "ok" if not okru_result.get("error") else "error"
+                if okru_result.get("error"):
+                    result["errors"].append(f"okru: {okru_result.get('error')}")
+            except Exception as e:
+                result["platforms"]["okru"] = "error"
+                result["errors"].append(f"okru: {str(e)}")
+
+        async def run_max_photo():
+            print("[MAX] Starting max photo upload...")
+            if not ENABLED_PLATFORMS["max"]:
+                print("[MAX] Disabled in settings")
+                result["platforms"]["max"] = "disabled"
+                return
+            if not max_configured():
+                print("[MAX] Not configured")
+                result["platforms"]["max"] = "error"
+                result["errors"].append("max: not configured")
+                return
+            try:
+                with open(carousel["local_paths"][0], "rb") as f:
+                    photo_bytes = f.read()
+                print(f"[MAX] Read photo: {len(photo_bytes)} bytes")
+                
+                caption_entities = channel_post.get("caption_entities", [])
+                print(f"[MAX] Sending with caption: {adapted_caption_max[:50]}...")
+                max_result = await max_post_photo(photo_bytes, adapted_caption_max, caption_entities)
+                print(f"[MAX] Result: {max_result}")
+                result["platforms"]["max"] = "ok" if not max_result.get("error") else "error"
+                if max_result.get("error"):
+                    result["errors"].append(f"max: {max_result.get('error')}")
+            except Exception as e:
+                import traceback
+                print(f"[MAX] Error: {e}")
+                traceback.print_exc()
+                result["platforms"]["max"] = "error"
+                result["errors"].append(f"max: {str(e)}")
+        
+        await run_okru_photo()
+        await run_max_photo()
         await cleanup_carousel(carousel["carousel_id"])
 
     elif content_type == "VIDEO":
         video_obj = channel_post.get("video") or channel_post.get("animation", {})
         caption   = channel_post.get("caption", "")
         print(f"[ADAPT] Original caption: {caption[:100]}...")
-        adapted_caption = await adapt_vk(caption) if caption else ""
-        print(f"[ADAPT] Adapted caption: {adapted_caption[:100]}...")
+        adapted_caption_vk = await adapt_content(caption) if caption else ""
+        adapted_caption_max = await adapt_content_max(caption) if caption else ""
+        print(f"[ADAPT] Adapted caption: {adapted_caption_vk[:100]}...")
         file_id   = video_obj.get("file_id", "")
         file_size = video_obj.get("file_size", 0)
         thumb_obj = video_obj.get("thumbnail") or video_obj.get("thumb")
@@ -475,7 +651,7 @@ async def _do_crosspost(channel_post: dict) -> dict:
                 result["platforms"]["vk"] = "disabled"
                 return
             try:
-                vk_result = await post_video_vk(video_bytes, adapted_caption or caption)
+                vk_result = await post_video_vk(video_bytes, adapted_caption_vk or caption)
                 result["platforms"]["vk"] = "ok" if vk_result.get("response") else "error"
                 if not vk_result.get("response"):
                     result["errors"].append(f"vk: {vk_result.get('error', 'unknown')}")
@@ -495,9 +671,9 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     _, video_url, _, cover_url = save_video_with_cover(
                         video_bytes, thumbnail_bytes, folder_name
                     )
-                    ig_result = await ig_post_reel(video_url, adapted_caption or caption, cover_url)
+                    ig_result = await ig_post_reel(video_url, adapted_caption_vk or caption, cover_url)
                 else:
-                    ig_result = await post_reel_instagram(video_bytes, adapted_caption or caption, thumbnail_bytes)
+                    ig_result = await post_reel_instagram(video_bytes, adapted_caption_vk or caption, thumbnail_bytes)
                 result["platforms"]["instagram"] = "ok" if ig_result.get("status") == "ok" else "error"
                 if ig_result.get("status") != "ok":
                     result["errors"].append(f"instagram: {ig_result.get('reason', 'unknown')}")
@@ -509,7 +685,30 @@ async def _do_crosspost(channel_post: dict) -> dict:
                     # Удаляем папку через 60 сек, чтобы Instagram успел скачать файлы
                     asyncio.create_task(cleanup_dated_folder(folder_name, delay_seconds=60))
 
-        await asyncio.gather(run_vk_video(), run_instagram_reel())
+        async def run_max_video():
+            if not ENABLED_PLATFORMS["max"]:
+                result["platforms"]["max"] = "disabled"
+                return
+            if not max_configured():
+                result["platforms"]["max"] = "error"
+                result["errors"].append("max: not configured")
+                return
+            try:
+                caption_entities = channel_post.get("caption_entities", [])
+                print(f"[MAX VIDEO] Starting upload, video size: {len(video_bytes)} bytes, caption: {(adapted_caption_max or caption)[:80]}")
+                max_result = await max_post_video(video_bytes, adapted_caption_max, caption_entities)
+                print(f"[MAX VIDEO] Result: {max_result}")
+                result["platforms"]["max"] = "ok" if not max_result.get("error") else "error"
+                if max_result.get("error"):
+                    result["errors"].append(f"max: {max_result.get('error')}")
+            except Exception as e:
+                import traceback
+                print(f"[MAX VIDEO] Exception: {e}")
+                traceback.print_exc()
+                result["platforms"]["max"] = "error"
+                result["errors"].append(f"max: {str(e)}")
+
+        await asyncio.gather(run_vk_video(), run_instagram_reel(), run_max_video())
 
     if result["errors"]:
         result["status"] = "partial" if result["platforms"] else "error"
@@ -627,6 +826,101 @@ async def pinterest_callback(request: Request):
     """)
 
 
+# ─── OK.ru OAuth ───────────────────────────────────────────────────────────────
+
+OKRU_APP_ID = os.getenv("OKRU_APP_ID")
+OKRU_APP_KEY = os.getenv("OKRU_APP_KEY")
+OKRU_APP_SECRET = os.getenv("OKRU_APP_SECRET")
+OKRU_REDIRECT_URI = os.getenv("OKRU_REDIRECT_URI", "")
+OKRU_TOKEN_FILE = os.getenv("OKRU_TOKEN_FILE", "/root/okru_token.json")
+OKRU_SCOPES = "VALUABLE_ACCESS;LONG_ACCESS_TOKEN;GROUP_CONTENT;PHOTO_CONTENT"
+
+
+async def okru_auth(request: Request):
+    """Редирект на страницу авторизации Одноклассников."""
+    if not OKRU_APP_ID or not OKRU_REDIRECT_URI:
+        return HTMLResponse(
+            "<h2>❌ Не заданы OKRU_APP_ID или OKRU_REDIRECT_URI в .env</h2>",
+            status_code=500,
+        )
+    url = (
+        "https://connect.ok.ru/oauth/authorize"
+        f"?client_id={OKRU_APP_ID}"
+        f"&scope={OKRU_SCOPES}"
+        f"&response_type=code"
+        f"&redirect_uri={OKRU_REDIRECT_URI}"
+    )
+    return RedirectResponse(url)
+
+
+async def okru_callback(request: Request):
+    """Принимает код от Одноклассников, обменивает на токены и сохраняет."""
+    import time
+    import hashlib
+    
+    code = request.query_params.get("code")
+    error = request.query_params.get("error")
+    
+    if error or not code:
+        return HTMLResponse(f"<h2>❌ Ошибка авторизации: {error or 'нет кода'}</h2>", status_code=400)
+    
+    if not OKRU_APP_ID or not OKRU_APP_SECRET:
+        return HTMLResponse("<h2>❌ Не заданы OKRU_APP_ID / OKRU_APP_SECRET</h2>", status_code=500)
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.ok.ru/oauth/token.do",
+                data={
+                    "client_id": OKRU_APP_ID,
+                    "client_secret": OKRU_APP_SECRET,
+                    "code": code,
+                    "redirect_uri": OKRU_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+                timeout=20,
+            )
+            tokens = r.json()
+    except Exception as e:
+        return HTMLResponse(f"<h2>�шибка запроса к Одноклассникам: {e}</h2>", status_code=500)
+    
+    if "access_token" not in tokens:
+        return HTMLResponse(f"<h2>❌ Одноклассники вернули ошибку: {tokens}</h2>", status_code=400)
+    
+    tokens["obtained_at"] = int(time.time())
+    
+    with open(OKRU_TOKEN_FILE, "w") as f:
+        json.dump(tokens, f, indent=2)
+    
+    expires_days = tokens.get("expires_in", 0) // 86400 if tokens.get("expires_in") else 30
+    
+    return HTMLResponse(f"""
+    <html><body style="font-family:sans-serif;padding:40px">
+    <h2>✅ Одноклассники авторизованы!</h2>
+    <p>Токены сохранены на сервере.</p>
+    <ul>
+      <li>access_token действует <b>{expires_days} дней</b></li>
+    </ul>
+    <p>Токен будет автоматически продлеваться при использовании API. Эту страницу можно закрыть.</p>
+    </body></html>
+    """)
+
+
+async def okru_groups_list(request: Request):
+    """Возвращает список групп пользователя в JSON"""
+    from tools.okru import get_ok_groups, load_token
+    
+    token = await load_token()
+    if not token:
+        return JSONResponse({"error": "NO_TOKEN", "message": "Токен Одноклассников не настроен"})
+    
+    try:
+        groups = await get_ok_groups()
+        return JSONResponse({"groups": groups})
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
 async def _register_webhook():
     """Регистрирует webhook в Telegram при старте сервера."""
     webhook_url = os.getenv("WEBHOOK_URL", "").rstrip("/")
@@ -673,6 +967,9 @@ app = Starlette(
         Route("/webhook", endpoint=webhook_handler, methods=["POST"]),
         Route("/pinterest/auth", endpoint=pinterest_auth, methods=["GET"]),
         Route("/pinterest/callback", endpoint=pinterest_callback, methods=["GET"]),
+        Route("/okru/auth", endpoint=okru_auth, methods=["GET"]),
+        Route("/okru/callback", endpoint=okru_callback, methods=["GET"]),
+        Route("/okru/groups", endpoint=okru_groups_list, methods=["GET"]),
     ],
     lifespan=lifespan,
 )
